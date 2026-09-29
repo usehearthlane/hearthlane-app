@@ -19,8 +19,8 @@ android {
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 5
-        versionName = "0.1.0"
+        versionCode = 6
+        versionName = "0.1.1"
 
         // Default environment for the shared Frigate/relay base domain. The
         // app points PROD and UAT at the same base domain (Frigate is shared);
