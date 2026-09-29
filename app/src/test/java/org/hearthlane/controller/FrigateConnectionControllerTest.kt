@@ -5,9 +5,11 @@ import androidx.test.core.app.ApplicationProvider
 import org.hearthlane.core.frigate.FrigateConnection
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.settings.AppSettings
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -291,6 +293,127 @@ class FrigateConnectionControllerTest {
             "_connecting must be reset even after cancellation",
             controller.connecting.value,
         )
+    }
+
+    @Test
+    fun `a re-probe requested during a connect retries once when it fails`() = runTest {
+        val results = mutableListOf(
+            { _: String -> FrigateConnection.Failed(error = "boom") },
+            { _: String -> FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1") },
+        )
+        var index = 0
+        val controller = createController(this) { url -> results[index++](url) }
+
+        controller.connect(restartPlayback = false)
+        // A re-probe (network callback / onForeground) arrives while the first
+        // connect is still in flight: it must not be lost.
+        controller.connect(restartPlayback = false)
+        advanceUntilIdle()
+
+        assertEquals("the pending re-probe must run one retry", 2, index)
+        assertEquals(
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1"),
+            controller.connection.value,
+        )
+    }
+
+    @Test
+    fun `a re-probe requested during a successful connect is consumed without churn`() = runTest {
+        var calls = 0
+        val controller = createController(this) {
+            calls++
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1")
+        }
+
+        controller.connect(restartPlayback = false)
+        controller.connect(restartPlayback = false)
+        advanceUntilIdle()
+
+        assertEquals("a successful connect consumes the pending re-probe", 1, calls)
+        assertEquals(
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1"),
+            controller.connection.value,
+        )
+    }
+
+    @Test
+    fun `multiple re-probes during a connect coalesce into one retry`() = runTest {
+        val results = mutableListOf(
+            { _: String -> FrigateConnection.Failed(error = "boom") },
+            { _: String -> FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1") },
+        )
+        var index = 0
+        val controller = createController(this) { url -> results[index++](url) }
+
+        controller.connect(restartPlayback = false)
+        controller.connect(restartPlayback = false)
+        controller.connect(restartPlayback = false)
+        controller.connect(restartPlayback = false)
+        advanceUntilIdle()
+
+        assertEquals("every pending request coalesces into a single retry", 2, index)
+        assertEquals(
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1"),
+            controller.connection.value,
+        )
+    }
+
+    @Test
+    fun `awaitConnectedAfterResume does not resolve on a stale retained connection`() = runTest {
+        val controller = createController(this) {
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1")
+        }
+        controller.connect(restartPlayback = false)
+        advanceUntilIdle()
+        assertEquals(
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1"),
+            controller.connection.value,
+        )
+        val staleGen = controller.connectGeneration.value
+
+        // A resume begins at this generation: awaiting must NOT return on the
+        // stale Connected value retained through ON_STOP.
+        val resumed = CompletableDeferred<Unit>()
+        val awaitJob = launch {
+            controller.awaitConnectedAfterResume(staleGen)
+            resumed.complete(Unit)
+        }
+        advanceUntilIdle()
+        assertFalse("a stale connection must not satisfy the resume await", resumed.isCompleted)
+
+        // The resume connect completes after the resume -> the await resolves.
+        controller.connect(restartPlayback = false)
+        advanceUntilIdle()
+        assertTrue("await resolves once a connect completes after the resume", resumed.isCompleted)
+        awaitJob.join()
+    }
+
+    @Test
+    fun `awaitConnectedAfterResume retries a failed resume connect once`() = runTest {
+        val results = mutableListOf(
+            { _: String -> FrigateConnection.Failed(error = "boom") },
+            { _: String -> FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1") },
+        )
+        var index = 0
+        val controller = createController(this) { url -> results[index++](url) }
+
+        // The onForeground resume connect is launched and fails.
+        controller.connect(restartPlayback = false)
+        val genAtResume = controller.connectGeneration.value
+        val resumed = CompletableDeferred<Unit>()
+        val awaitJob = launch {
+            controller.awaitConnectedAfterResume(genAtResume)
+            resumed.complete(Unit)
+        }
+        advanceUntilIdle()
+
+        assertTrue("the failed resume connect must be retried by the await", resumed.isCompleted)
+        assertEquals("the retry reaches Connected", 2, index)
+        assertEquals(
+            FrigateConnection.Connected(TransportKind.TAILSCALE, "0.17.1"),
+            controller.connection.value,
+        )
+        awaitJob.join()
     }
 
     private fun authRequired(controller: FrigateConnectionController): Boolean {

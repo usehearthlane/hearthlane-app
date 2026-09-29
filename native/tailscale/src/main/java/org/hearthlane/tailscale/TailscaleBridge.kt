@@ -1,5 +1,6 @@
 package org.hearthlane.tailscale
 
+import android.os.SystemClock
 import android.util.Log
 import org.hearthlane.core.connectivity.ConnectivityState
 import org.hearthlane.core.connectivity.ConnectivityStatus
@@ -7,6 +8,9 @@ import org.hearthlane.core.connectivity.HttpBytesResult
 import org.hearthlane.core.connectivity.HttpStream
 import org.hearthlane.tsembed.Tsembed
 import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -25,29 +29,63 @@ object TailscaleBridge {
     }
 
     /**
-     * Serializes every native lifecycle mutation. The Go side keeps a single
-     * global tsnet node, and multiple Kotlin gateways (the foreground controller
-     * and the location foreground service) plus the connection managers can
-     * drive Start/Stop concurrently. Overlapping native Start/Stop on the same
-     * global state is the SIGABRT source observed in "Reconfigure remote access
-     * -> Test connection", so the mutating calls never run concurrently.
+     * Process-global node ownership. The counter transition and the physical
+     * start/stop are one atomic critical section (see [TsnetOwnership]), so a
+     * first-start can never cross a last-stop: there is no window where a
+     * consumer holds a lease while the node is stopped, or where start/stop
+     * run out of order. This also serializes the native Start/Stop calls that
+     * were the SIGABRT source in "Reconfigure remote access -> Test
+     * connection".
      */
-    private val lifecycleLock = Any()
-
-    fun start(hostname: String, authKey: String, stateDir: String) {
-        synchronized(lifecycleLock) {
+    private val ownership = TsnetOwnership(
+        start = { hostname, authKey, stateDir ->
             Log.i(TAG, "[TsnetLifecycle] start begin")
-            Tsembed.start(hostname, authKey, stateDir)
+            runCatching { Tsembed.start(hostname, authKey, stateDir) }
+                .onFailure { Log.w(TAG, "[TsnetLifecycle] start failed synchronously: ${it.message}") }
             Log.i(TAG, "[TsnetLifecycle] start requested (async)")
-        }
-    }
-
-    fun stop() {
-        synchronized(lifecycleLock) {
+        },
+        stop = {
             Log.i(TAG, "[TsnetLifecycle] stop begin")
-            Tsembed.stop()
+            runCatching { Tsembed.stop() }
+                .onFailure { Log.w(TAG, "[TsnetLifecycle] stop failed; node may already be down", it) }
             Log.i(TAG, "[TsnetLifecycle] stop complete")
-        }
+        },
+    )
+
+    /**
+     * Process-global interactive-enrollment ownership. It keeps the exact
+     * physical node that produced a pending login URL alive while the user
+     * authorizes, independently of the consumer that discovered NeedsLogin.
+     * See [TsnetEnrollmentSession] for the full model.
+     */
+    internal val enrollmentSession = TsnetEnrollmentSession(
+        retainOwnership = { ownership.retain() },
+        releaseOwnership = { ownership.release() },
+        readStatus = { status() },
+        monitorScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    )
+
+    /**
+     * Registers one consumer use; starts the node when this is the first
+     * consumer. Returns true when the caller is the starter.
+     */
+    fun acquire(hostname: String, authKey: String, stateDir: String): Boolean =
+        ownership.acquire(hostname, authKey, stateDir)
+
+    /**
+     * Releases one consumer use; stops the node when this is the last
+     * consumer. Returns true when the caller triggered the stop.
+     */
+    fun release(): Boolean = ownership.release()
+
+    /**
+     * Drops every consumer claim and forces the node down (admin reset). The
+     * enrollment session is discarded WITHOUT releasing: the reset zeroes every
+     * claim itself, so a release here would double-stop the node.
+     */
+    fun resetOwnership() {
+        enrollmentSession.discard()
+        ownership.reset()
     }
 
     /**
@@ -117,10 +155,20 @@ object TailscaleBridge {
      * [HttpStream]. Blocks the calling thread and must not be invoked on the
      * main thread. The body is read incrementally through [HttpStream.read],
      * which pulls bounded chunks from the Go side; it is never buffered whole.
+     * [headers] are propagated to the Go request (for example a Range header
+     * requested by Media3).
      */
-    fun httpOpenStream(url: String, connectTimeoutMs: Long): HttpStream {
-        val info = Tsembed.openHttpStream(url, connectTimeoutMs)
-        return TsnetHttpStream(info.id, info.statusCode.toInt(), info.contentType, info.finalURL)
+    fun httpOpenStream(url: String, headers: Map<String, String>, connectTimeoutMs: Long): HttpStream {
+        val headersJson = if (headers.isEmpty()) "" else JSONObject(headers).toString()
+        val info = Tsembed.openHttpStream(url, headersJson, connectTimeoutMs)
+        val contentLength = info.contentLength.takeIf { it >= 0 }
+        return TsnetHttpStream(
+            id = info.id,
+            statusCode = info.statusCode.toInt(),
+            contentType = info.contentType,
+            finalUrl = info.finalURL,
+            contentLength = contentLength,
+        )
     }
 
     /**
@@ -164,27 +212,52 @@ private class TsnetHttpStream(
     override val statusCode: Int,
     override val contentType: String?,
     override val finalUrl: String,
+    override val contentLength: Long?,
 ) : HttpStream {
 
     private val closed = AtomicBoolean(false)
+    private var readCount = 0L
+    private var maxReadDurationMs = 0L
+    private var totalBytes = 0L
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length <= 0) return 0
         if (closed.get()) return -1
+        val start = SystemClock.elapsedRealtime()
         val result = Tsembed.readChunk(id, length.toLong())
+        val durationMs = SystemClock.elapsedRealtime() - start
         if (result.eof) return -1
         val chunk = result.data ?: return 0
         if (chunk.isEmpty()) return 0
+        readCount++
+        maxReadDurationMs = maxOf(maxReadDurationMs, durationMs)
+        totalBytes += chunk.size
         chunk.copyInto(buffer, destinationOffset = offset, startIndex = 0, endIndex = chunk.size)
         return chunk.size
     }
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            // Only slow streams are surfaced: a stream whose readChunk ever took
+            // >= 500 ms is exactly the delivery problem worth diagnosing, and
+            // logging every stream close (playlists at ~1/s) would be noise.
+            if (maxReadDurationMs >= SLOW_READ_THRESHOLD_MS) {
+                Log.i(
+                    DIAG_TAG,
+                    "[VideoTransport] slow-stream-close reads=$readCount maxReadMs=$maxReadDurationMs " +
+                        "totalBytes=$totalBytes transport=TAILSCALE",
+                )
+            }
             Tsembed.closeStream(id)
         }
     }
+
+    private companion object {
+        const val SLOW_READ_THRESHOLD_MS = 500L
+    }
 }
+
+private const val DIAG_TAG = "VideoTransport"
 
 /**
  * Builds an [HttpBytesResult] from a gomobile HTTP response, normalizing the

@@ -48,16 +48,32 @@ class Go2RtcStreams(private val getter: HttpBytesGetter) {
      * Returns the go2rtc stream name for the selected camera, or null when no
      * stream matches.
      *
-     * The only live-playback selection path in V1: the stream is chosen by
-     * exact camera id / stream name equality, never by stream order or by
-     * picking a first stream. The camera key equals the go2rtc stream name on
-     * the installs proven so far; if a real payload ever diverges, that
-     * divergence is reported rather than guessed (docs/PLAN.md Decision Log).
+     * The live-playback selection is done by [streamNameForLive]; this exact
+     * id-match lookup is the fallback/legacy path and never guesses by order.
      *
      * @throws Exception when the request fails or returns a non-2xx status.
      */
     suspend fun streamNameForCamera(baseUrl: String, cameraId: String, timeoutMs: Long): String? =
         if (cameraId in streamNames(baseUrl, timeoutMs)) cameraId else null
+
+    /**
+     * Returns the go2rtc stream name for the selected camera's live view under
+     * [preference], or null when the camera has no playable stream.
+     *
+     * The preference is the ONLY context input: the live view passes MAIN for
+     * the local path and REMOTE_SUB for the remote path, and this method maps
+     * it to the stream list discovered from go2rtc. The selection never
+     * guesses by order and never assumes a substream exists: REMOTE_SUB
+     * falls back to the main stream when `<cameraId>_sub` is absent.
+     *
+     * @throws Exception when the request fails or returns a non-2xx status.
+     */
+    suspend fun streamNameForLive(
+        baseUrl: String,
+        cameraId: String,
+        preference: LiveStreamPreference,
+        timeoutMs: Long,
+    ): String? = selectLiveStreamName(cameraId, streamNames(baseUrl, timeoutMs), preference)
 
     /**
      * HLS/fMP4 live URL for a go2rtc stream, proxied through Frigate under the
@@ -163,6 +179,40 @@ class Go2RtcStreams(private val getter: HttpBytesGetter) {
                 i++
             }
             return keys
+        }
+    }
+}
+
+/**
+ * Live stream quality preference for the selected camera.
+ *
+ * Currently only two concrete policies exist (MAIN for the local path,
+ * REMOTE_SUB for the remote path). The enum is intentionally small so future
+ * contexts (AUTO/HIGH/LOW) can extend the policy without changing callers.
+ */
+enum class LiveStreamPreference { MAIN, REMOTE_SUB }
+
+/**
+ * Pure stream-selection policy for the live view.
+ *
+ * - [LiveStreamPreference.MAIN]: the camera's own stream name (exact match).
+ * - [LiveStreamPreference.REMOTE_SUB]: `<cameraId>_sub` when present in
+ *   [availableStreams], otherwise the camera's main stream.
+ *
+ * Selection is always by exact name equality — never by substring/prefix or
+ * stream order. Returns null when the camera id itself is not playable.
+ */
+internal fun selectLiveStreamName(
+    cameraId: String,
+    availableStreams: Set<String>,
+    preference: LiveStreamPreference,
+): String? {
+    if (cameraId !in availableStreams) return null
+    return when (preference) {
+        LiveStreamPreference.MAIN -> cameraId
+        LiveStreamPreference.REMOTE_SUB -> {
+            val sub = "${cameraId}_sub"
+            if (sub in availableStreams) sub else cameraId
         }
     }
 }

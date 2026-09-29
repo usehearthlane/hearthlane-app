@@ -21,6 +21,15 @@ interface HttpStream : Closeable {
     val finalUrl: String
 
     /**
+     * Length of the response body when the server announced it (Content-Length,
+     * or the range length for a 206), null when unknown (chunked/streamed).
+     * Lets a Media3 DataSource report a known length to the player for HLS
+     * segments and clips; unknown lengths fall back to EOF-driven reads.
+     */
+    val contentLength: Long?
+        get() = null
+
+    /**
      * Reads up to [length] bytes into [buffer] starting at [offset].
      *
      * @return the number of bytes read, or -1 at end of stream.
@@ -38,10 +47,13 @@ interface HttpStream : Closeable {
  * local implementation uses the normal Android network. A non-2xx response is
  * returned (status preserved), not thrown; only transport failures throw.
  *
+ * [headers] are the request headers Media3 asked the DataSource to send
+ * (for example `Range`, `Accept`, `User-Agent`); an empty map sends none.
+ *
  * @param connectTimeoutMs timeout for establishing the connection and reading
  *   the response headers. The body may remain open for the whole playback, so
  *   this is never treated as a budget for the entire download.
  */
 fun interface HttpStreamGetter {
-    suspend fun open(url: String, connectTimeoutMs: Long): HttpStream
+    suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream
 }

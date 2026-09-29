@@ -36,7 +36,7 @@ class HttpUrlConnectionStreamGetterTest {
     fun `open preserves status content type and final url`() = runBlocking {
         server.handler = { Response.Fixed(200, "video/mp4", "0123456789".toByteArray()) }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000, emptyMap())
 
         assertEquals(200, stream.statusCode)
         assertEquals("video/mp4", stream.contentType)
@@ -48,7 +48,7 @@ class HttpUrlConnectionStreamGetterTest {
     fun `reads the body incrementally across multiple calls until EOF`() = runBlocking {
         server.handler = { Response.Fixed(200, "video/mp4", "0123456789abcdef".toByteArray()) }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000, emptyMap())
 
         assertEquals("0123", readText(stream, 4))
         assertEquals("4567", readText(stream, 4))
@@ -64,7 +64,7 @@ class HttpUrlConnectionStreamGetterTest {
             Response.Chunked(200, "video/mp4", listOf("part1".toByteArray(), "part2".toByteArray()))
         }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/chunked", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/chunked", 2_000, emptyMap())
 
         assertEquals("part1", readText(stream, 5))
         assertEquals("part2", readText(stream, 5))
@@ -78,7 +78,7 @@ class HttpUrlConnectionStreamGetterTest {
             Response.CloseDelimited(200, "video/mp4", "0123456789".toByteArray())
         }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000, emptyMap())
 
         assertEquals("0123", readText(stream, 4))
         assertEquals("456789", readText(stream, 6))
@@ -100,7 +100,7 @@ class HttpUrlConnectionStreamGetterTest {
             Response.Chunked(200, "application/octet-stream", blocks)
         }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/large", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/large", 2_000, emptyMap())
         val buffer = ByteArray(1024)
         var total = 0
         var maxRead = 0
@@ -123,7 +123,7 @@ class HttpUrlConnectionStreamGetterTest {
     fun `404 preserves the status and yields a readable or empty body`() = runBlocking {
         server.handler = { Response.Fixed(404, "text/plain", ByteArray(0)) }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/missing", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/missing", 2_000, emptyMap())
 
         assertEquals(404, stream.statusCode)
         // No body was sent; read reaches EOF without throwing.
@@ -135,7 +135,7 @@ class HttpUrlConnectionStreamGetterTest {
     fun `500 preserves the status`() = runBlocking {
         server.handler = { Response.Fixed(500, "text/plain", "boom".toByteArray()) }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/broken", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/broken", 2_000, emptyMap())
 
         assertEquals(500, stream.statusCode)
         stream.close()
@@ -145,7 +145,7 @@ class HttpUrlConnectionStreamGetterTest {
     fun `close releases the connection and makes further reads return EOF`() = runBlocking {
         server.handler = { Response.Fixed(200, "video/mp4", "0123456789".toByteArray()) }
 
-        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000)
+        val stream = HttpUrlConnectionStreamGetter().open("${server.url}/clip", 2_000, emptyMap())
 
         assertEquals("0123", readText(stream, 4))
         stream.close()
@@ -158,7 +158,7 @@ class HttpUrlConnectionStreamGetterTest {
         val streamGetter = HttpUrlConnectionStreamGetter()
         var thrown: Exception? = null
         try {
-            streamGetter.open("http://127.0.0.1:1/clip", 500)
+            streamGetter.open("http://127.0.0.1:1/clip", 500, emptyMap())
         } catch (e: Exception) {
             thrown = e
         }

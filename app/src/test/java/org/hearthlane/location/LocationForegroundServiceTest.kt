@@ -139,4 +139,56 @@ class LocationForegroundServiceTest {
         assertEquals(5 * 60_000L, LocationForegroundService.MAX_PUBLISH_INTERVAL_MS)
         assertEquals(100.0, LocationForegroundService.DISTANCE_THRESHOLD_METERS, 0.0)
     }
+
+    @Test
+    fun `destroy cleans up the exclusive gateway and is idempotent`() {
+        setSharingEnabled(true)
+        val service = Robolectric
+            .buildService(
+                LocationForegroundService::class.java,
+                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+            )
+            .create()
+
+        service.startCommand(0, 1)
+        awaitReady { service.get().publisherWired }
+
+        // onDestroy stops the exclusive location gateway (native stop is
+        // swallowed under Robolectric) and must never throw or block the main
+        // thread; a repeated destroy must be equally safe.
+        service.destroy()
+        service.destroy()
+    }
+
+    @Test
+    fun `interval switches rebuild the session without orphaning the gateway`() {
+        setSharingEnabled(true)
+        val service = Robolectric
+            .buildService(
+                LocationForegroundService::class.java,
+                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+            )
+            .create()
+
+        service.startCommand(0, 1)
+        awaitReady { service.get().publisherWired }
+
+        // Each interval switch runs restartLoop: the old gateway/session must be
+        // released before the new one is built, so no tsnet node is left
+        // Running without an owner between rebuilds.
+        service.withIntent(
+            LocationForegroundService.intent(context, LocationForegroundService.ACTIVE_INTERVAL_MS),
+        )
+        service.startCommand(0, 2)
+        awaitReady { service.get().publisherWired }
+
+        service.withIntent(
+            LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+        )
+        service.startCommand(0, 3)
+        awaitReady { service.get().publisherWired }
+
+        service.destroy()
+        service.destroy()
+    }
 }

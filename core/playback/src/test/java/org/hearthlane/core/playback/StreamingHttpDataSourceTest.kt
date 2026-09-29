@@ -155,8 +155,9 @@ class StreamingHttpDataSourceTest {
     }
 
     @Test
-    fun `HTTP 404 surfaces HttpStatusIOException with the status`() = runBlocking {
-        val dataSource = dataSource(stream = FakeStream(404, "text/plain", baseUrl, ""))
+    fun `HTTP 404 surfaces the Media3 InvalidResponseCodeException with the status`() = runBlocking {
+        val stream = FakeStream(404, "text/plain", baseUrl, "")
+        val dataSource = dataSource(stream = stream)
 
         var thrown: Exception? = null
         try {
@@ -164,12 +165,17 @@ class StreamingHttpDataSourceTest {
         } catch (e: Exception) {
             thrown = e
         }
-        assertTrue(thrown is HttpStatusIOException)
-        assertEquals(404, (thrown as HttpStatusIOException).statusCode)
+        val http = thrown as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
+        assertTrue(
+            "a non-2xx must throw the Media3-native HTTP exception so Media3's HLS " +
+                "404/410 retry policy applies",
+            http != null,
+        )
+        assertEquals(404, http!!.responseCode)
     }
 
     @Test
-    fun `HTTP 500 surfaces HttpStatusIOException with the status`() = runBlocking {
+    fun `HTTP 500 surfaces the Media3 InvalidResponseCodeException with the status`() = runBlocking {
         val dataSource = dataSource(stream = FakeStream(500, "text/plain", baseUrl, ""))
 
         var thrown: Exception? = null
@@ -178,8 +184,32 @@ class StreamingHttpDataSourceTest {
         } catch (e: Exception) {
             thrown = e
         }
-        assertTrue(thrown is HttpStatusIOException)
-        assertEquals(500, (thrown as HttpStatusIOException).statusCode)
+        val http = thrown as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
+        assertTrue("a 500 must be an InvalidResponseCodeException", http != null)
+        assertEquals(500, http!!.responseCode)
+    }
+
+    @Test
+    fun `the underlying stream is closed on an HTTP error`() = runBlocking {
+        val stream = FakeStream(404, "text/plain", baseUrl, "")
+        val dataSource = dataSource(stream = stream)
+
+        try {
+            open(dataSource, position = 0, length = C.LENGTH_UNSET.toLong())
+        } catch (e: Exception) {
+            // expected: HTTP 404
+        }
+
+        assertTrue("an HTTP error must close the underlying stream", stream.closed)
+    }
+
+    @Test
+    fun `resource classification never leaks the session id or query`() {
+        assertEquals("MASTER", classifyResource("http://frigate/api/go2rtc/api/stream.m3u8?src=cam&mp4"))
+        assertEquals("MEDIA_PLAYLIST", classifyResource("http://frigate/api/go2rtc/api/playlist.m3u8?id=abc123"))
+        assertEquals("INIT_SEGMENT", classifyResource("http://frigate/api/go2rtc/api/init.mp4?id=abc123"))
+        assertEquals("MEDIA_SEGMENT", classifyResource("http://frigate/api/go2rtc/api/segment.m4s?id=abc123"))
+        assertEquals("OTHER", classifyResource("http://frigate/api/events/x/clip.mp4"))
     }
 
     @Test
@@ -270,6 +300,91 @@ class StreamingHttpDataSourceTest {
     }
 
     @Test
+    fun `open returns a known Content-Length when the server announces it`() = runBlocking {
+        val stream = FakeStream(
+            200,
+            "video/mp4",
+            baseUrl,
+            "0123456789",
+            contentLengthOverride = 10,
+        )
+        val dataSource = dataSource(stream = stream)
+
+        val length = open(dataSource, position = 0, length = C.LENGTH_UNSET.toLong())
+
+        assertEquals(10L, length)
+        assertEquals("0123456789", readAll(dataSource))
+        dataSource.close()
+    }
+
+    @Test
+    fun `a 206 range body is not skipped and reports the range length`() = runBlocking {
+        // The server honored Range: the body already starts at the requested
+        // position and Content-Length is the range length.
+        val stream = FakeStream(206, "video/mp4", baseUrl, "456789", contentLengthOverride = 6)
+        val dataSource = dataSource(stream = stream)
+
+        val length = open(dataSource, position = 4, length = C.LENGTH_UNSET.toLong())
+
+        assertEquals(6L, length)
+        assertEquals("no skip must happen for a 206 body", 0L, stream.offset)
+        assertEquals("456789", readAll(dataSource))
+        dataSource.close()
+    }
+
+    @Test
+    fun `a 200 body with a skipped position reports the remaining length`() = runBlocking {
+        val stream = FakeStream(200, "video/mp4", baseUrl, "0123456789", contentLengthOverride = 10)
+        val dataSource = dataSource(stream = stream)
+
+        val length = open(dataSource, position = 4, length = C.LENGTH_UNSET.toLong())
+
+        assertEquals(6L, length)
+        assertEquals("456789", readAll(dataSource))
+        dataSource.close()
+    }
+
+    @Test
+    fun `open does not consume the body`() = runBlocking {
+        val stream = FakeStream(200, "video/mp4", baseUrl, "0123456789")
+        val dataSource = dataSource(stream = stream)
+
+        open(dataSource, position = 0, length = C.LENGTH_UNSET.toLong())
+
+        assertEquals("open must return after headers, before any body read", 0, stream.readCount)
+        assertEquals("0123", readN(dataSource, 4))
+        dataSource.close()
+    }
+
+    @Test
+    fun `headers from the DataSpec reach the getter`() = runBlocking {
+        val getter = RecordingGetter(FakeStream(200, "video/mp4", baseUrl, "0123456789"))
+        val dataSource = StreamingHttpDataSource(getter, 2_000)
+
+        val spec = DataSpec.Builder()
+            .setUri(baseUrl)
+            .setPosition(0)
+            .setLength(C.LENGTH_UNSET.toLong())
+            .setHttpRequestHeaders(mapOf("Range" to "bytes=0-9", "User-Agent" to "test"))
+            .build()
+        dataSource.open(spec)
+
+        assertEquals(mapOf("Range" to "bytes=0-9", "User-Agent" to "test"), getter.lastHeaders)
+        dataSource.close()
+    }
+
+    @Test
+    fun `open does not read the body when a Content-Length is announced`() = runBlocking {
+        val stream = FakeStream(200, "video/mp4", baseUrl, "0123456789", contentLengthOverride = 10)
+        val dataSource = dataSource(stream = stream)
+
+        open(dataSource, position = 0, length = C.LENGTH_UNSET.toLong())
+
+        assertEquals(0, stream.readCount)
+        dataSource.close()
+    }
+
+    @Test
     fun `the factory creates a fresh DataSource per request`() {
         val factory = StreamingHttpDataSourceFactory(
             RecordingGetter(FakeStream(200, "video/mp4", baseUrl, "x")),
@@ -323,11 +438,13 @@ class StreamingHttpDataSourceTest {
         var lastUrl: String? = null
         var lastConnectTimeout: Long = 0
         var openCount = 0
+        var lastHeaders: Map<String, String>? = null
 
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream {
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream {
             openCount++
             lastUrl = url
             lastConnectTimeout = connectTimeoutMs
+            lastHeaders = headers
             openError?.let { throw it }
             return stream
         }
@@ -338,7 +455,10 @@ class StreamingHttpDataSourceTest {
         override val contentType: String?,
         override val finalUrl: String,
         private val body: String,
+        private val contentLengthOverride: Long? = null,
     ) : HttpStream {
+        override val contentLength: Long?
+            get() = contentLengthOverride
         val closedFlag = AtomicBoolean(false)
         val closed: Boolean get() = closedFlag.get()
         var offset: Long = 0

@@ -22,7 +22,7 @@ class TsnetStreamGetterTest {
         val gateway = FakeGateway(stream = FakeStream(200, "video/mp4", "http://frigate/clip", "abcdef"))
         val getter = TsnetStreamGetter(gateway)
 
-        val stream = getter.open("http://frigate/clip", 2_000)
+        val stream = getter.open("http://frigate/clip", 2_000, emptyMap())
 
         assertEquals(listOf("http://frigate/clip"), gateway.openedUrls)
         assertEquals(200, stream.statusCode)
@@ -38,7 +38,7 @@ class TsnetStreamGetterTest {
         val stream = FakeStream(200, "video/mp4", "http://frigate/clip", "0123456789")
         val getter = TsnetStreamGetter(FakeGateway(stream = stream))
 
-        val opened = getter.open("http://frigate/clip", 2_000)
+        val opened = getter.open("http://frigate/clip", 2_000, emptyMap())
 
         assertEquals("0123", readText(opened, 4))
         assertEquals("4567", readText(opened, 4))
@@ -54,7 +54,7 @@ class TsnetStreamGetterTest {
 
         var thrown: Exception? = null
         try {
-            getter.open("http://frigate/clip", 2_000)
+            getter.open("http://frigate/clip", 2_000, emptyMap())
         } catch (e: Exception) {
             thrown = e
         }
@@ -66,7 +66,7 @@ class TsnetStreamGetterTest {
         val stream = FakeStream(200, "video/mp4", "http://frigate/clip", "abcdef")
         val getter = TsnetStreamGetter(FakeGateway(stream = stream))
 
-        val opened = getter.open("http://frigate/clip", 2_000)
+        val opened = getter.open("http://frigate/clip", 2_000, emptyMap())
         opened.close()
 
         assertEquals(-1, opened.read(ByteArray(4), 0, 4))
@@ -78,7 +78,7 @@ class TsnetStreamGetterTest {
         val stream = FakeStream(200, "video/mp4", "http://frigate/clip", "abcdef")
         val getter = TsnetStreamGetter(FakeGateway(stream = stream))
 
-        val opened = getter.open("http://frigate/clip", 2_000)
+        val opened = getter.open("http://frigate/clip", 2_000, emptyMap())
         opened.close()
         opened.close()
 
@@ -98,7 +98,7 @@ class TsnetStreamGetterTest {
         override suspend fun httpGetBytes(url: String, timeoutMs: Long): HttpBytesResult =
             HttpBytesResult(200, "application/json", url, ByteArray(0))
 
-        override suspend fun httpOpenStream(url: String, connectTimeoutMs: Long): HttpStream {
+        override suspend fun httpOpenStream(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream {
             openedUrls.add(url)
             openError?.let { throw it }
             return requireNotNull(stream)

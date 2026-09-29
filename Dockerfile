@@ -1,7 +1,7 @@
 FROM eclipse-temurin:21-jdk AS java
 FROM golang:1.25-bookworm AS go
 
-FROM opencode-base
+FROM agents-base
 
 USER root
 
@@ -13,7 +13,7 @@ ENV JAVA_HOME=/opt/java/openjdk
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_NDK_HOME=/opt/android-sdk/ndk/${ANDROID_NDK_VERSION}
 
-ENV GOPATH=/home/opencode/go
+ENV GOPATH=/home/agent/go
 
 ENV PATH="${JAVA_HOME}/bin:${PATH}:/usr/local/go/bin:${GOPATH}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
@@ -38,13 +38,13 @@ RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" \
        "platforms;android-36" \
        "build-tools;36.0.0" \
        "ndk;${ANDROID_NDK_VERSION}" \
-    && chown -R opencode:opencode "${ANDROID_HOME}" \
+    && chown -R agent:agent "${ANDROID_HOME}" \
     && mkdir -p "${GOPATH}" \
-    && chown -R opencode:opencode "${GOPATH}"
+    && chown -R agent:agent "${GOPATH}"
 
 RUN apt-get update && apt-get install -y gh
 
-USER opencode
+USER agent
 
 RUN go install golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION} \
     && go install golang.org/x/mobile/cmd/gobind@${GOMOBILE_VERSION} \

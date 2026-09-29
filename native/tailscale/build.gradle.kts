@@ -22,6 +22,12 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        // Android framework calls return defaults (no "not mocked" crashes) in
+        // the plain-JVM unit tests of the bridge module.
+        unitTests.isReturnDefaultValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -108,4 +114,5 @@ dependencies {
     // the app compiles against them directly (see the 9.2 spike endpoint).
     api(files(goClassesJar) { builtBy(extractGoAar) })
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

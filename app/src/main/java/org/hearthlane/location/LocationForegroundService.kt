@@ -7,10 +7,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.location.LocationManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import org.hearthlane.BuildConfig
 import org.hearthlane.R
+import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.core.relay.RelayConfig
 import org.hearthlane.settings.AppSettings
 import org.hearthlane.tailscale.TsnetGatewayImpl
@@ -55,6 +58,8 @@ class LocationForegroundService : Service() {
     private var stateJob: Job? = null
     private var wiringJob: Job? = null
     private var appSettings: AppSettings? = null
+    @Volatile
+    private var locationGateway: TsnetGateway? = null
     @Volatile
     private var destroyed = false
 
@@ -129,6 +134,7 @@ class LocationForegroundService : Service() {
         context = applicationContext,
         defaultBaseDomain = BuildConfig.HEARTHLANE_BASE_DOMAIN,
         scope = serviceScope,
+        relaySubdomain = BuildConfig.HEARTHLANE_RELAY_SUBDOMAIN,
     ).also { it.ready.first { ready -> ready } }
 
     private fun buildPublisher(settings: AppSettings) {
@@ -141,6 +147,9 @@ class LocationForegroundService : Service() {
             stateDir = File(filesDir, "tailscale").absolutePath,
             connectTimeoutMs = RelayConfig("", "").tailscaleConnectTimeoutMs,
         )
+        locationGateway = gateway
+        val connectivityManager =
+            applicationContext.getSystemService(ConnectivityManager::class.java)
         val session = RelayPublishSession(
             gateway = gateway,
             config = {
@@ -149,10 +158,11 @@ class LocationForegroundService : Service() {
                     tailscaleBaseUrl = settings.relayBaseUrl.value,
                 )
             },
+            networkType = { connectivityManager?.let(::networkTypeLabel) },
         )
         val p = BackgroundLocationPublisher(
             readLocation = { reader.readCurrent(LOCATION_TIMEOUT_MS) },
-            relayClient = session::client,
+            publish = session::publish,
             deviceId = { AppSettings.nodeHostname(settings.nodeSuffix.value) },
             checkIntervalMs = { intervalMs.get() },
             scope = serviceScope,
@@ -174,6 +184,10 @@ class LocationForegroundService : Service() {
         loopJob = null
         stateJob?.cancel()
         stateJob = null
+        // Release the previous gateway's claim before the new session replaces
+        // it, so a stale session can never leave the node Running without an
+        // owner (converges to STOPPED when nothing else uses it).
+        releaseLocationGateway()
         ensurePublisher()
     }
 
@@ -189,7 +203,24 @@ class LocationForegroundService : Service() {
         wiringJob = null
         LocationDiagnosticsMonitor.onServiceStopped()
         serviceScope.cancel()
+        releaseLocationGateway()
         super.onDestroy()
+    }
+
+    /**
+     * Releases the location gateway's claim on the shared node and drops the
+     * reference. Best-effort and idempotent: it runs on its own IO scope
+     * (survives [serviceScope] cancellation) and never blocks the main thread
+     * or throws. A no-op when no gateway is installed.
+     */
+    private fun releaseLocationGateway() {
+        val gateway = locationGateway
+        locationGateway = null
+        if (gateway == null) return
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            runCatching { gateway.stopIfRunning() }
+            TsnetLifecycleMonitor.onNodeStop()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -215,6 +246,19 @@ class LocationForegroundService : Service() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+
+    /** Maps the active network to a coarse label ("WIFI"/"CELLULAR"/"OTHER")
+     *  for diagnostics only; never exposes addresses. Null when unknown. */
+    private fun networkTypeLabel(connectivityManager: ConnectivityManager): String? {
+        val network = runCatching { connectivityManager.activeNetwork }.getOrNull() ?: return null
+        val caps = runCatching { connectivityManager.getNetworkCapabilities(network) }.getOrNull()
+            ?: return null
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+            else -> "OTHER"
+        }
+    }
 
     companion object {
         const val ACTION_START = "org.hearthlane.location.START"

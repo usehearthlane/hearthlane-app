@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Hearthlane</string>
+    <!-- Discrete in-app environment marker. Empty in prod; each non-prod flavor
+         overrides it (for example "UAT") so testers can identify the build. -->
+    <string name="environment_badge" translatable="false"></string>
     <string name="settings_loading">Loading settings…</string>
     <string name="auth_url_hint">This device needs enrollment. Open this URL in a browser while signed in to the tailnet admin:</string>
     <string name="auth_url_pending_hint">The enrollment URL is not available yet. Wait a moment and tap Retry.</string>

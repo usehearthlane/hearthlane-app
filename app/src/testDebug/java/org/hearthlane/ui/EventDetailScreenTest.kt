@@ -331,13 +331,13 @@ class EventDetailScreenTest {
 
     /** A streaming getter whose body is exhausted immediately (EOF on first read). */
     private class EmptyStreamGetter : HttpStreamGetter {
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream =
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream =
             EmptyStream(200, "video/mp4", url)
     }
 
     /** A streaming getter whose body blocks on read until closed (stays Loading). */
     private class BlockingStreamGetter : HttpStreamGetter {
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream =
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream =
             BlockingStream(200, "video/mp4", url)
     }
 
@@ -345,7 +345,7 @@ class EventDetailScreenTest {
     private class ErrorStreamGetter(
         private val statusCode: Int,
     ) : HttpStreamGetter {
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream =
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream =
             EmptyStream(statusCode, "video/mp4", url)
     }
 

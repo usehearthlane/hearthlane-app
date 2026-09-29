@@ -5,11 +5,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -30,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -57,6 +60,33 @@ import org.hearthlane.core.frigate.CameraDiscoveryState
 import org.hearthlane.core.frigate.FrigateConnection
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.thumbnail.CameraThumbnailModelFactory
+
+/**
+ * App-bar title for Home. Shows a discrete environment badge after the product
+ * name when the build is not prod (the [R.string.environment_badge] resource
+ * is empty in prod, so the prod rendering is unchanged).
+ */
+@Composable
+private fun HomeTitle() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(stringResource(R.string.home_title))
+        val badge = stringResource(R.string.environment_badge)
+        if (badge.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Text(
+                    text = badge,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+    }
+}
 
 /**
  * V1.3 family-facing Home screen.
@@ -95,7 +125,7 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.home_title)) },
+                title = { HomeTitle() },
                 actions = {
                     ConnectionStatusIndicator(
                         connection = connection,

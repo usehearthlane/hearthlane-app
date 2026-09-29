@@ -182,4 +182,45 @@ class HearthlaneEndpointResolverTest {
         assertEquals("http://frigate.hearthlane.example", endpoints.frigateBaseUrl)
         assertEquals("http://relay.hearthlane.example", endpoints.relayBaseUrl)
     }
+
+    @Test
+    fun `resolve honors an environment relay subdomain while Frigate stays shared`() {
+        // UAT layout: same base domain as PROD (Frigate is shared), only the
+        // relay service label differs.
+        val uat = HearthlaneEndpointResolver.resolve("hearthlane.omni.corp", "relay-uat")!!
+
+        assertEquals("http://frigate.hearthlane.omni.corp", uat.frigateBaseUrl)
+        assertEquals("http://relay-uat.hearthlane.omni.corp", uat.relayBaseUrl)
+    }
+
+    @Test
+    fun `relayEndpoint honors an environment relay subdomain`() {
+        assertEquals(
+            "http://relay-uat.hearthlane.omni.corp",
+            HearthlaneEndpointResolver.relayEndpoint("hearthlane.omni.corp", "relay-uat"),
+        )
+    }
+
+    @Test
+    fun `normalizeServiceLabel accepts a hyphenated label and trims case`() {
+        assertEquals("relay-uat", HearthlaneEndpointResolver.normalizeServiceLabel("  Relay-UAT  "))
+        assertEquals("relay", HearthlaneEndpointResolver.normalizeServiceLabel("relay"))
+    }
+
+    @Test
+    fun `normalizeServiceLabel rejects schemes paths ports and blanks`() {
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel(""))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("   "))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("http://relay"))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("relay.example"))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("relay:8080"))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("relay/path"))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("-relay"))
+        assertNull(HearthlaneEndpointResolver.normalizeServiceLabel("relay-"))
+    }
+
+    @Test
+    fun `resolve rejects an invalid relay subdomain`() {
+        assertNull(HearthlaneEndpointResolver.resolve("hearthlane.example", "relay/path"))
+    }
 }

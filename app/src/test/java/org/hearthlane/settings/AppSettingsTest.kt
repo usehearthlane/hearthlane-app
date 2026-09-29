@@ -82,6 +82,46 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `derives a UAT relay endpoint from the configured relay subdomain`() = runTest {
+        val settings = AppSettings.createForTest(
+            dataStore = dataStore(backgroundScope),
+            defaultBaseDomain = "hearthlane.omni.corp",
+            scope = backgroundScope,
+            relaySubdomain = "relay-uat",
+        )
+
+        settings.ready.first { it }
+
+        // Frigate stays shared with PROD; only the relay label is the UAT one.
+        assertEquals("http://frigate.hearthlane.omni.corp", settings.frigateBaseUrl.value)
+        assertEquals("http://relay-uat.hearthlane.omni.corp", settings.relayBaseUrl.value)
+    }
+
+    @Test
+    fun `UAT relay subdomain survives a base domain edit and re-derivation`() = runTest {
+        val store = dataStore(backgroundScope)
+        val settings = AppSettings.createForTest(
+            dataStore = store,
+            defaultBaseDomain = "hearthlane.example",
+            scope = backgroundScope,
+            relaySubdomain = "relay-uat",
+        )
+        settings.ready.first { it }
+
+        settings.setBaseDomain("omni.corp")
+
+        val reloaded = AppSettings.createForTest(
+            dataStore = store,
+            defaultBaseDomain = "hearthlane.example",
+            scope = backgroundScope,
+            relaySubdomain = "relay-uat",
+        )
+        reloaded.ready.first { it }
+        assertEquals("http://frigate.omni.corp", reloaded.frigateBaseUrl.value)
+        assertEquals("http://relay-uat.omni.corp", reloaded.relayBaseUrl.value)
+    }
+
+    @Test
     fun `persists an edited base domain across instances and re-derives endpoints`() = runTest {
         val store = dataStore(backgroundScope)
         val settings = AppSettings.createForTest(store, "hearthlane.example", backgroundScope)

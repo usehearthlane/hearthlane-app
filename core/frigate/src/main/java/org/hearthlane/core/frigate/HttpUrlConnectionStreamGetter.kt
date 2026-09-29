@@ -20,34 +20,46 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class HttpUrlConnectionStreamGetter : HttpStreamGetter {
 
-    override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream =
-        withContext(Dispatchers.IO) {
-            val connection = URL(url).openConnection() as HttpURLConnection
-            try {
-                connection.requestMethod = "GET"
-                connection.connectTimeout = connectTimeoutMs.toInt()
-                // No read timeout: the response may stay open for the whole
-                // playback (a stalled peer is interrupted by close() instead).
-                val code = connection.responseCode
-                val contentType = connection.getHeaderField("Content-Type")
-                val finalUrl = connection.url.toString()
-                val body = if (code in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-                HttpUrlConnectionStream(code, contentType, finalUrl, body, connection)
-            } catch (e: Exception) {
-                connection.disconnect()
-                throw e
+    override suspend fun open(
+        url: String,
+        connectTimeoutMs: Long,
+        headers: Map<String, String>,
+    ): HttpStream = withContext(Dispatchers.IO) {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = connectTimeoutMs.toInt()
+            headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
+            // No read timeout: the response may stay open for the whole
+            // playback (a stalled peer is interrupted by close() instead).
+            val code = connection.responseCode
+            val contentType = connection.getHeaderField("Content-Type")
+            val finalUrl = connection.url.toString()
+            val body = if (code in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream
             }
+            HttpUrlConnectionStream(
+                code,
+                contentType,
+                finalUrl,
+                (connection.contentLength).takeIf { it >= 0 }?.toLong(),
+                body,
+                connection,
+            )
+        } catch (e: Exception) {
+            connection.disconnect()
+            throw e
         }
+    }
 }
 
 private class HttpUrlConnectionStream(
     override val statusCode: Int,
     override val contentType: String?,
     override val finalUrl: String,
+    override val contentLength: Long?,
     private val body: InputStream?,
     private val connection: HttpURLConnection,
 ) : HttpStream {

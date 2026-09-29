@@ -172,7 +172,7 @@ class EventPlayerTest {
     ) : HttpStreamGetter {
         val openedUrls = mutableListOf<String>()
 
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream {
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream {
             openedUrls.add(url)
             throwOnOpen?.let { throw it }
             return FakeStream(statusCode, "video/mp4", url)

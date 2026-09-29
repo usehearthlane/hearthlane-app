@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,12 +94,32 @@ class FrigateConnectionController internal constructor(
     private val _networkTick = MutableStateFlow(0)
     val networkTick: StateFlow<Int> = _networkTick.asStateFlow()
 
+    /**
+     * Monotonic counter bumped on EVERY connect completion (success or
+     * failure, never cancellation). The foreground resume recovery uses it to
+     * distinguish a connection re-established after an ON_START from the stale
+     * value the controller retains through ON_STOP.
+     */
+    private val _connectGeneration = MutableStateFlow(0)
+    val connectGeneration: StateFlow<Int> = _connectGeneration.asStateFlow()
+
     /** Last failure message, kept for the Diagnostics report (V1.5). */
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     private var probeJob: Job? = null
+    private var connectJob: Job? = null
     private var callbackRegistered = false
+
+    /**
+     * A re-probe requested while a connect is in flight. Multiple requests are
+     * coalesced into one retry: the in-flight connect honours it with a single
+     * new attempt when it fails, and consumes it silently when it succeeds (no
+     * redundant reconnect churn). Cleared on background so a pending retry
+     * never fires while the process is not in the foreground.
+     */
+    @Volatile
+    private var reconnectRequested = false
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = scheduleReProbe("onAvailable")
@@ -126,18 +147,50 @@ class FrigateConnectionController internal constructor(
     }
 
     /**
+     * Stops the whole foreground connection when the process leaves the
+     * foreground: unregisters the network listener AND cancels any in-flight
+     * [connect]. Without the cancellation, a probe that was already launched
+     * could still acquire a tsnet lease after the foreground lease is released
+     * (I7/I6: nothing keeps the node running once the app is in the
+     * background). Distinct from [stop], which navigation uses and must not
+     * tear down an in-flight connect that the next screen relies on.
+     */
+    fun stopForBackground() {
+        stop()
+        connectJob?.cancel()
+        connectJob = null
+        // Drop any pending re-probe: a retry must never fire while the process
+        // is backgrounded, and the foreground resume starts a fresh connect.
+        reconnectRequested = false
+        // The cancelled connect's `finally` runs asynchronously on the next
+        // dispatch; reset synchronously so a foreground return is not blocked
+        // by a stale _connecting=true.
+        _connecting.value = false
+    }
+
+    /**
      * Runs the transparent connect strategy. With [restartPlayback] true the
      * live view is forced to re-establish playback; false only refreshes the
      * connection state (network re-probes).
      */
     fun connect(restartPlayback: Boolean) {
-        if (_connecting.value) return
+        if (_connecting.value) {
+            // A connect is already in flight: remember that a re-probe was
+            // requested. The in-flight connect honours it with one retry when
+            // it fails, and consumes it silently when it succeeds — a requested
+            // re-probe must never simply disappear because it arrived while
+            // _connecting was true.
+            reconnectRequested = true
+            return
+        }
         _connecting.value = true
         val baseUrl = settings.frigateBaseUrl.value
         Log.i(TAG, "connect requested (baseUrl=$baseUrl, restartPlayback=$restartPlayback)")
-        scope.launch {
+        connectJob?.cancel()
+        connectJob = scope.launch {
+            var result: FrigateConnection? = null
             try {
-                val result = withContext(ioDispatcher) { runConnect(baseUrl) }
+                result = withContext(ioDispatcher) { runConnect(baseUrl) }
                 if (result is FrigateConnection.Connected) {
                     val previous = _lastProbedTransport.value
                     val switched = previous != null && previous != result.transport
@@ -156,10 +209,46 @@ class FrigateConnectionController internal constructor(
                     (result as? FrigateConnection.Failed)?.let { _lastError.value = it.error }
                 }
                 _connection.value = result
+                _connectGeneration.update { it + 1 }
                 if (restartPlayback) _connectAttempt.update { it + 1 } else _networkTick.update { it + 1 }
             } finally {
                 _connecting.value = false
+                runPendingReconnect(result)
             }
+        }
+    }
+
+    /**
+     * Honours a re-probe that arrived while a connect was in flight. Coalesced
+     * into exactly one retry when the completed connect failed; a successful
+     * (or cancelled) connect consumes the request without further churn. Every
+     * attempt is serialized by [connect], so two connects never run at once.
+     */
+    private fun runPendingReconnect(result: FrigateConnection?) {
+        if (!reconnectRequested) return
+        reconnectRequested = false
+        if (result is FrigateConnection.Failed) {
+            Log.i(TAG, "re-probe requested during a failed connect; retrying once")
+            connect(restartPlayback = false)
+        }
+    }
+
+    /**
+     * Waits for the embedded node to become reachable after a foreground
+     * resume. Suspends until a connect that completed after [afterGeneration]
+     * reaches Connected; a connect that failed is retried once (serialized by
+     * [connect]). The foreground functional recovery awaits this before
+     * re-running an interrupted load, so a discovery/events request never
+     * fires while Tailscale is still STARTING.
+     */
+    suspend fun awaitConnectedAfterResume(afterGeneration: Int) {
+        connectGeneration.first { gen -> gen > afterGeneration }
+        if (_connection.value is FrigateConnection.Connected) return
+        Log.i(TAG, "resume connect failed; retrying once before functional recovery")
+        connect(restartPlayback = false)
+        val retryGen = connectGeneration.value
+        connectGeneration.first { gen ->
+            gen > retryGen && _connection.value is FrigateConnection.Connected
         }
     }
 
@@ -171,6 +260,7 @@ class FrigateConnectionController internal constructor(
      * identity; the transport counters are preserved as diagnostics history.
      */
     fun resetTailscale() {
+        reconnectRequested = false
         scope.launch {
             runCatching { gateway.reset() }
                 .onFailure { Log.w(TAG, "tailscale identity reset failed", it) }

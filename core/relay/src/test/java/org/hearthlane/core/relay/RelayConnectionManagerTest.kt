@@ -49,7 +49,7 @@ class RelayConnectionManagerTest {
         override suspend fun httpGet(url: String, timeoutMs: Long): String = "{}"
         override suspend fun httpGetBytes(url: String, timeoutMs: Long) =
             HttpBytesResult(200, "application/json", url, ByteArray(0))
-        override suspend fun httpOpenStream(url: String, connectTimeoutMs: Long): HttpStream =
+        override suspend fun httpOpenStream(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream =
             throw UnsupportedOperationException()
     }
 

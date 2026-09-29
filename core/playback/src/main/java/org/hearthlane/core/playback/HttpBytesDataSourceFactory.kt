@@ -13,8 +13,9 @@ class HttpBytesDataSourceFactory(
     private val getter: HttpBytesGetter,
     private val timeoutMs: Long,
     private val onBytes: (Long) -> Unit = {},
+    private val diagLabel: String = "LIVE",
 ) : DataSource.Factory {
 
     override fun createDataSource(): DataSource =
-        HttpBytesDataSource(getter, timeoutMs, onBytes)
+        HttpBytesDataSource(getter, timeoutMs, onBytes, diagLabel)
 }

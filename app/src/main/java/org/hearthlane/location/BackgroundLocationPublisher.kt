@@ -2,7 +2,6 @@ package org.hearthlane.location
 
 import android.location.Location
 import org.hearthlane.core.relay.DeviceLocation
-import org.hearthlane.core.relay.RelayClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -40,7 +39,7 @@ import kotlin.math.max
  */
 internal class BackgroundLocationPublisher(
     private val readLocation: suspend () -> LocationReadResult,
-    private val relayClient: suspend () -> RelayClient,
+    private val publish: suspend (String, DeviceLocation) -> Int,
     private val deviceId: () -> String,
     private val checkIntervalMs: () -> Long,
     private val scope: CoroutineScope,
@@ -138,7 +137,7 @@ internal class BackgroundLocationPublisher(
         _state.update { it.copy(lastPublishAttemptAtMs = now) }
         val id = deviceId()
         return try {
-            val status = relayClient().publishLocation(id, pending)
+            val status = publish(id, pending)
             lastPublished = pending
             latestPending = null
             _state.update { current ->

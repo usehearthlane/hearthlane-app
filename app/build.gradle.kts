@@ -17,13 +17,40 @@ android {
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "org.hearthlane"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 5
         versionName = "0.1.0"
 
+        // Default environment for the shared Frigate/relay base domain. The
+        // app points PROD and UAT at the same base domain (Frigate is shared);
+        // only the relay service label differs per flavor below.
         buildConfigField("String", "HEARTHLANE_BASE_DOMAIN", "\"$hearthlaneBaseDomain\"")
+
+        manifestPlaceholders["appLabel"] = "Hearthlane"
+    }
+
+    // One flavor dimension: the deployment environment. PROD and UAT are two
+    // fully independent apps (own applicationId => own sandbox) that differ
+    // only in the relay endpoint they consume and in the visible identity.
+    flavorDimensions += "environment"
+    productFlavors {
+        create("prod") {
+            dimension = "environment"
+            applicationId = "org.hearthlane"
+            manifestPlaceholders["appLabel"] = "Hearthlane"
+            // Prod relay lives under the historical `relay.<domain>` label.
+            buildConfigField("String", "HEARTHLANE_RELAY_SUBDOMAIN", "\"relay\"")
+        }
+        create("uat") {
+            dimension = "environment"
+            applicationId = "org.hearthlane.uat"
+            versionNameSuffix = "-uat"
+            manifestPlaceholders["appLabel"] = "Hearthlane UAT"
+            // UAT consumes a dedicated relay on the same base domain; Frigate
+            // stays shared (both flavors resolve it from the base domain).
+            buildConfigField("String", "HEARTHLANE_RELAY_SUBDOMAIN", "\"relay-uat\"")
+        }
     }
 
     signingConfigs {
@@ -85,16 +112,15 @@ android {
 
 // Release tasks validate signing credentials early so the failure is explicit
 // and close to the command that triggered it. Debug builds are unaffected when
-// the release properties are absent.
+// the release properties are absent. With product flavors the release tasks are
+// per variant (assembleProdRelease, assembleUatRelease, ...), so the guard
+// matches every task that packages or signs a *Release variant.
 tasks.configureEach {
-    val releaseTaskNames = setOf(
-        "assembleRelease",
-        "bundleRelease",
-        "packageRelease",
-        "signReleaseBundle",
-        "signReleaseUniversalApk",
-    )
-    if (name in releaseTaskNames || name.startsWith("signRelease")) {
+    val isReleasePackaging =
+        name.contains("Release") &&
+            (name.startsWith("assemble") || name.startsWith("bundle") ||
+                name.startsWith("package") || name.startsWith("sign"))
+    if (isReleasePackaging) {
         doFirst {
             val cfg = android.signingConfigs.getByName("release")
             require(cfg.storeFile != null && cfg.storeFile!!.exists()) {
@@ -123,10 +149,16 @@ tasks.configureEach {
 // activity into the debug manifest, but the release manifest never contains
 // it, so the Robolectric launch cannot resolve it on release. The Compose
 // contract is fully covered by the debug unit tests; release runs the
-// non-UI suites.
+// non-UI suites. With product flavors the release unit-test tasks are per
+// variant (testProdReleaseUnitTest, testUatReleaseUnitTest, ...).
 tasks.configureEach {
-    if (name == "testReleaseUnitTest") {
-        (this as org.gradle.api.tasks.testing.Test).filter { excludeTestsMatching("org.hearthlane.ui.LiveViewTest") }
+    val isReleaseUnitTest =
+        (this as? org.gradle.api.tasks.testing.Test) != null &&
+            name.startsWith("test") && name.endsWith("ReleaseUnitTest")
+    if (isReleaseUnitTest) {
+        (this as org.gradle.api.tasks.testing.Test).filter {
+            excludeTestsMatching("org.hearthlane.ui.LiveViewTest")
+        }
     }
 }
 

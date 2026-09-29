@@ -15,6 +15,7 @@ import org.hearthlane.core.relay.HttpRelayClient
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,6 +68,7 @@ class RelayConnectionController internal constructor(
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     private var probeInFlight = false
+    private var probeJob: Job? = null
 
     /**
      * Probes the relay with the current settings and refreshes the shared
@@ -80,7 +82,8 @@ class RelayConnectionController internal constructor(
         _connecting.value = true
         val baseUrl = settings.relayBaseUrl.value
         Log.i(TAG, "relay probe requested (baseUrl=$baseUrl)")
-        scope.launch {
+        probeJob?.cancel()
+        probeJob = scope.launch {
             try {
                 val result = withContext(ioDispatcher) { connector(baseUrl) }
                 if (result is RelayConnection.Connected) {
@@ -99,6 +102,21 @@ class RelayConnectionController internal constructor(
                 probeInFlight = false
             }
         }
+    }
+
+    /**
+     * Cancels any in-flight probe when the process leaves the foreground, so a
+     * probe that was already launched cannot acquire a tsnet lease after the
+     * foreground lease is released (I7/I6). The map screen probes again on the
+     * next foreground; this never tears down a cached LOCAL/Tailscale result.
+     */
+    fun stopForBackground() {
+        probeJob?.cancel()
+        probeJob = null
+        // The cancelled probe's `finally` runs asynchronously on the next
+        // dispatch; reset synchronously so a foreground return can probe again.
+        _connecting.value = false
+        probeInFlight = false
     }
 
     /** Clears the embedded node identity (administrator Settings reset). */

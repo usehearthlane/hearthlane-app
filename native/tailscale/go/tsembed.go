@@ -59,6 +59,16 @@ var (
 	started   bool
 	lastErr   error
 
+	// Node-scoped HTTP transport/client: shared across requests so HLS (which
+	// issues many small requests: playlists, init, one per media segment) gets
+	// normal net/http connection pooling/keep-alive over the tunnel instead of
+	// a fresh netstack dial + TLS setup per request. Tied to the exact node
+	// ([httpServer]) and cleared on Stop, so a restarted node never reuses a
+	// transport bound to a previous node's netstack.
+	httpTransport *http.Transport
+	httpClient    *http.Client
+	httpServer    *tsnet.Server
+
 	// startServer is swapped in tests to simulate tsnet startup outcomes
 	// without requiring a real tailnet connection.
 	startServer = func(s *tsnet.Server) error { return s.Start() }
@@ -240,6 +250,7 @@ func Start(hostname, authKey, stateDir string) error {
 					lastErr = fmt.Errorf("tsembed: lifecycle panicked: %v", r)
 				}
 				mu.Unlock()
+				clearHTTPClient()
 				cancelFn()
 			}
 		}()
@@ -257,6 +268,7 @@ func Start(hostname, authKey, stateDir string) error {
 			logf("start failed: %v", err)
 			logf("cleanup after failed start")
 			cleanupFailedServer(s)
+			clearHTTPClient()
 			return
 		}
 		mu.Lock()
@@ -311,6 +323,9 @@ func Stop() error {
 	if done != nil {
 		<-done
 	}
+	// The node is fully closed: release the shared transport so a restarted
+	// node never reuses a transport bound to the previous node's netstack.
+	clearHTTPClient()
 	mu.Lock()
 	server, cancel, startDone = nil, nil, nil
 	started = false
@@ -415,9 +430,7 @@ func HttpGet(url string, timeoutMs int64) (string, error) {
 // HLS spike because every request is a bounded response (a manifest or a media
 // segment); a streaming consumer would need a different primitive.
 func HttpGetBytes(url string, timeoutMs int64) (*HttpResult, error) {
-	mu.Lock()
-	s, running := server, started
-	mu.Unlock()
+	s, running := currentServer()
 	if s == nil || !running {
 		return nil, errors.New("tsembed: node not running")
 	}
@@ -428,30 +441,7 @@ func HttpGetBytes(url string, timeoutMs int64) (*HttpResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tsembed: parse url: %w", err)
 	}
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		if u.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-
-	ip, err := resolveHost(ctx, s, host)
-	if err != nil {
-		return nil, err
-	}
-
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 1 || portNum > 65535 {
-		return nil, fmt.Errorf("tsembed: invalid port %q", port)
-	}
-
-	client := newClient(func(dctx context.Context, network, _ string) (net.Conn, error) {
-		return dialNetstackTCP(dctx, s, ip, portNum)
-	})
-	resp, err := doGet(ctx, client, u, host)
+	resp, err := doGet(ctx, httpClientFor(s), u, u.Hostname())
 	if err != nil {
 		return nil, err
 	}
@@ -479,20 +469,18 @@ func HttpPut(url, contentType, body string, timeoutMs int64) (*HttpResult, error
 // through the tunnel (never the OS network) and the node must be Running. A
 // non-2xx status is returned, not thrown.
 func HttpRequest(method, url, contentType, headersJSON, body string, timeoutMs int64) (*HttpResult, error) {
-	mu.Lock()
-	s, running := server, started
-	mu.Unlock()
+	s, running := currentServer()
 	if s == nil || !running {
 		return nil, errors.New("tsembed: node not running")
 	}
-	return httpRequestInternal(method, url, contentType, headersJSON, body, timeoutMs, s, func(dctx context.Context, ip netip.Addr, port int) (net.Conn, error) {
-		return dialNetstackTCP(dctx, s, ip, port)
-	})
+	return httpRequestInternal(method, url, contentType, headersJSON, body, timeoutMs, httpClientFor(s))
 }
 
-// httpRequestInternal performs the request. [dial] is injectable so tests can
-// exercise the whole flow against a local server without a running node.
-func httpRequestInternal(method, url, contentType, headersJSON, body string, timeoutMs int64, s *tsnet.Server, dial func(ctx context.Context, ip netip.Addr, port int) (net.Conn, error)) (*HttpResult, error) {
+// httpRequestInternal performs the request through the given client. The
+// client is injectable so tests exercise the whole flow against a local server
+// without a running node; production passes the node-scoped shared client
+// ([httpClientFor]) so connections are pooled across requests.
+func httpRequestInternal(method, url, contentType, headersJSON, body string, timeoutMs int64, client *http.Client) (*HttpResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -501,33 +489,12 @@ func httpRequestInternal(method, url, contentType, headersJSON, body string, tim
 		return nil, fmt.Errorf("tsembed: parse url: %w", err)
 	}
 	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		if u.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-
-	ip, err := resolveHost(ctx, s, host)
-	if err != nil {
-		return nil, err
-	}
-
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 1 || portNum > 65535 {
-		return nil, fmt.Errorf("tsembed: invalid port %q", port)
-	}
 
 	headers, err := parseHeadersJSON(headersJSON)
 	if err != nil {
 		return nil, err
 	}
 
-	client := newClient(func(dctx context.Context, network, _ string) (net.Conn, error) {
-		return dial(dctx, ip, portNum)
-	})
 	resp, err := doRequest(ctx, client, u, host, method, contentType, headers, body)
 	if err != nil {
 		return nil, err
@@ -585,10 +552,11 @@ func parseHeadersJSON(headersJSON string) (http.Header, error) {
 // reads the body incrementally with [ReadChunk] until [CloseStream]; the body
 // is never buffered whole.
 type HttpStreamInfo struct {
-	Id          int64
-	StatusCode  int
-	ContentType string
-	FinalURL    string
+	Id            int64
+	StatusCode    int
+	ContentType   string
+	FinalURL      string
+	ContentLength int64
 }
 
 // httpStream is one open streaming response. Reads are serialized by a mutex
@@ -614,24 +582,23 @@ var (
 // incremental for the whole playback: a connect timeout bounds the dial, but
 // the request context carries no deadline, so a large clip can be consumed
 // progressively. The node must already be Running.
-func OpenHttpStream(url string, connectTimeoutMs int64) (*HttpStreamInfo, error) {
-	mu.Lock()
-	s, running := server, started
-	mu.Unlock()
+func OpenHttpStream(url, headersJSON string, connectTimeoutMs int64) (*HttpStreamInfo, error) {
+	s, running := currentServer()
 	if s == nil || !running {
 		return nil, errors.New("tsembed: node not running")
 	}
-	return openHttpStream(url, connectTimeoutMs, s, func(dctx context.Context, ip netip.Addr, port int) (net.Conn, error) {
-		return dialNetstackTCP(dctx, s, ip, port)
-	})
+	return openHttpStream(url, headersJSON, connectTimeoutMs, httpClientFor(s))
 }
 
-// openHttpStream performs the request and registers the stream. [dial] is
-// injectable so tests can exercise the whole flow against a local server
-// without a running node.
-func openHttpStream(url string, connectTimeoutMs int64, s *tsnet.Server, dial func(ctx context.Context, ip netip.Addr, port int) (net.Conn, error)) (*HttpStreamInfo, error) {
+// openHttpStream performs the request and registers the stream. The client is
+// injectable so tests exercise the whole flow against a local server without a
+// running node; production passes the node-scoped shared client so the
+// connection stays pooled after the stream closes.
+func openHttpStream(url, headersJSON string, connectTimeoutMs int64, client *http.Client) (*HttpStreamInfo, error) {
 	// Cancel-only context: the response body may remain open for the whole
-	// playback. The connect timeout is enforced at the dial layer below.
+	// playback. The connect timeout is enforced at the dial layer (see
+	// netstackDialContext), and a shorter per-request deadline is subsumed by
+	// the request context when a caller provides one.
 	ctx, cancel := context.WithCancel(context.Background())
 	fail := func(err error) (*HttpStreamInfo, error) {
 		cancel()
@@ -643,31 +610,23 @@ func openHttpStream(url string, connectTimeoutMs int64, s *tsnet.Server, dial fu
 		return fail(fmt.Errorf("tsembed: parse url: %w", err))
 	}
 	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		if u.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 1 || portNum > 65535 {
-		return fail(fmt.Errorf("tsembed: invalid port %q", port))
-	}
-
-	ip, err := resolveHost(ctx, s, host)
+	headers, err := parseHeadersJSON(headersJSON)
 	if err != nil {
 		return fail(err)
 	}
 
-	client := newClient(func(dctx context.Context, network, _ string) (net.Conn, error) {
-		dialCtx, dialCancel := context.WithTimeout(dctx, time.Duration(connectTimeoutMs)*time.Millisecond)
-		defer dialCancel()
-		return dial(dialCtx, ip, portNum)
-	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fail(fmt.Errorf("tsembed: build request: %w", err))
+	}
+	req.Host = host
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 
-	resp, err := doGet(ctx, client, u, host)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -683,10 +642,11 @@ func openHttpStream(url string, connectTimeoutMs int64, s *tsnet.Server, dial fu
 		finalURL = resp.Request.URL.String()
 	}
 	return &HttpStreamInfo{
-		Id:          id,
-		StatusCode:  resp.StatusCode,
-		ContentType: resp.Header.Get("Content-Type"),
-		FinalURL:    finalURL,
+		Id:            id,
+		StatusCode:    resp.StatusCode,
+		ContentType:   resp.Header.Get("Content-Type"),
+		FinalURL:      finalURL,
+		ContentLength: resp.ContentLength,
 	}, nil
 }
 
@@ -780,12 +740,81 @@ func (st *httpStream) close() {
 	}
 }
 
-// newClient builds an http.Client whose transport dials with the given
-// DialContext. Production dials through netstack (the tunnel); tests inject a
-// standard dialer.
+// newClient builds a per-request client whose transport dials with the given
+// DialContext. Used by tests to inject a standard dialer; production requests
+// use the node-scoped shared [httpClientFor] instead, so connections are pooled
+// across the many small requests HLS issues.
 func newClient(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{DialContext: dial},
+	}
+}
+
+// currentServer returns the running node under the lifecycle mutex.
+func currentServer() (*tsnet.Server, bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	return server, started
+}
+
+// httpClientFor returns the node-scoped shared HTTP client, creating its
+// transport on first use for the exact node [s]. Every tunnel request (HTTP
+// API calls and OpenHttpStream) shares this client, so net/http keeps the
+// connection open and reuses it for the next request instead of paying a fresh
+// netstack dial + TLS setup each time. A restarted node (different [s]) always
+// gets a fresh transport; the previous one is closed by [clearHTTPClient] on
+// Stop.
+func httpClientFor(s *tsnet.Server) *http.Client {
+	mu.Lock()
+	defer mu.Unlock()
+	if httpClient == nil || httpServer != s {
+		httpTransport = &http.Transport{
+			DialContext:        netstackDialContext(s),
+			IdleConnTimeout:    90 * time.Second,
+			MaxIdleConnsPerHost: 8,
+		}
+		httpClient = &http.Client{Transport: httpTransport}
+		httpServer = s
+	}
+	return httpClient
+}
+
+// clearHTTPClient releases the node-scoped client and its idle connections.
+// Called when the node stops or its lifecycle fails, so an old transport bound
+// to a previous node's netstack is never left behind.
+func clearHTTPClient() {
+	mu.Lock()
+	defer mu.Unlock()
+	if httpClient != nil {
+		httpClient.CloseIdleConnections()
+	}
+	httpTransport = nil
+	httpClient = nil
+	httpServer = nil
+}
+
+// netstackDialContext returns the DialContext used by the shared transport: it
+// resolves the hostname over the tunnel (cached) and dials through the node's
+// netstack, so every connection stays inside the tsnet tunnel. The dial is
+// bounded by a fixed connect timeout; a request context with a shorter
+// deadline (used by the bounded HTTP API calls) cancels the dial first.
+func netstackDialContext(s *tsnet.Server) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("tsembed: split %q: %w", addr, err)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("tsembed: invalid port %q", portStr)
+		}
+		dialCtx, dialCancel := context.WithTimeout(ctx, defaultDialTimeout)
+		defer dialCancel()
+		ip, err := resolveHost(dialCtx, s, host)
+		if err != nil {
+			return nil, err
+		}
+		return dialNetstackTCP(dialCtx, s, ip, port)
 	}
 }
 
@@ -1292,6 +1321,12 @@ const (
 	defaultSpikeHeadTimeoutMs   = int64(10_000)
 	defaultSpikeResponseTimeout = 10 * time.Second
 	maxSpikeRequestHeadBytes    = 8192
+
+	// defaultDialTimeout bounds every new connection over the tunnel. Long
+	// streaming bodies are unaffected (the dial context is released once the
+	// connection is established); short API requests cancel the dial earlier
+	// through their own context deadline.
+	defaultDialTimeout = 10 * time.Second
 )
 
 func readSpikeRequestHead(conn net.Conn) (method, path string, err error) {

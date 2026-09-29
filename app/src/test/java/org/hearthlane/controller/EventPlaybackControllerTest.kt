@@ -84,7 +84,7 @@ class EventPlaybackControllerTest {
     ) : HttpStreamGetter {
         val openedUrls = mutableListOf<String>()
 
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream {
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream {
             openedUrls.add(url)
             return RecordingStream(statusCode, "video/mp4", url)
         }

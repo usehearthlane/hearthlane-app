@@ -367,7 +367,7 @@ class EventDetailControllerTest {
         var statusCode: Int = 200,
         var throwOnOpen: Exception? = null,
     ) : HttpStreamGetter {
-        override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream {
+        override suspend fun open(url: String, connectTimeoutMs: Long, headers: Map<String, String>): HttpStream {
             throwOnOpen?.let { throw it }
             return EmptyStream(statusCode, "video/mp4", url)
         }

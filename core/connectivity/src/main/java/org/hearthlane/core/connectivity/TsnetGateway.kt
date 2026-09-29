@@ -104,12 +104,18 @@ interface TsnetGateway {
      *
      * [connectTimeoutMs] bounds establishing the connection and reading the
      * response headers; the body may remain open for the whole playback.
+     * [headers] are the request headers Media3 asked to send (for example
+     * `Range`, `Accept`, `User-Agent`).
      *
      * Implementations that do not support progressive streams inherit a
      * failing default, so test doubles of [TsnetGateway] are not forced to
      * model streaming until a test actually exercises it.
      */
-    suspend fun httpOpenStream(url: String, connectTimeoutMs: Long): HttpStream =
+    suspend fun httpOpenStream(
+        url: String,
+        connectTimeoutMs: Long,
+        headers: Map<String, String> = emptyMap(),
+    ): HttpStream =
         throw UnsupportedOperationException("TsnetGateway.httpOpenStream is not supported")
 }
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The UAT build name is never translated (the value-pt-rBR override in
+         main would otherwise win for pt-BR devices and mask the UAT identity).
+         Brand + environment marker stay literal across locales. -->
+    <string name="app_name">Hearthlane UAT</string>
+</resources>

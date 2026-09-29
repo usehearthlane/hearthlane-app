@@ -306,7 +306,7 @@ class SettingsScreenTest {
         val controller = controller()
         render(controller)
 
-        composeTestRule.onNodeWithText("Hearthlane").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("Hearthlane", substring = true).performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithText("Version 1.2.0").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithText("Build 3").performScrollTo().assertIsDisplayed()
     }

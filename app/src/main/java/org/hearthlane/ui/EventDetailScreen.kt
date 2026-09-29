@@ -50,6 +50,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import coil3.ImageLoader
@@ -60,6 +63,7 @@ import org.hearthlane.controller.EventDetailState
 import org.hearthlane.core.frigate.Event
 import org.hearthlane.core.playback.EventPlayer
 import org.hearthlane.core.playback.PlaybackStatus
+import org.hearthlane.core.playback.VideoDiag
 import org.hearthlane.thumbnail.CameraThumbnailModelFactory
 
 /**
@@ -88,6 +92,39 @@ internal fun EventDetailScreen(
 ) {
     val state by controller.state.collectAsState()
     val playbackStatus by controller.playbackState.collectAsState()
+
+    // Clip playback is paused when the process leaves the foreground and
+    // replayed on return, so a quick trip through Recents never leaves the
+    // media area broken: the foreground grace window keeps tsnet up, and the
+    // replay over the still-running node is fast. A real background tears the
+    // node down; the replay then surfaces a retryable playback error instead
+    // of a dead frozen frame (the app never keeps playback running invisibly
+    // in the background).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, controller) {
+        var wasActive = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    VideoDiag.player("EVENT", "lifecycle ON_STOP")
+                    wasActive = controller.playbackState.value is PlaybackStatus.Loading ||
+                        controller.playbackState.value is PlaybackStatus.Playing
+                    controller.stop()
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    val status = controller.playbackState.value
+                    if (wasActive || status is PlaybackStatus.Error) {
+                        wasActive = false
+                        VideoDiag.player("EVENT", "resume/retry playback")
+                        controller.play()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Presentation-only fullscreen state for the player. The same EventPlayer
     // instance is re-attached to the fullscreen surface; nothing about the

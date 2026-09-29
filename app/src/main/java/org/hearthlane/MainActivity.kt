@@ -22,6 +22,7 @@ class MainActivity : ComponentActivity() {
             AppRoot(
                 stateDir = stateDir,
                 defaultBaseDomain = BuildConfig.HEARTHLANE_BASE_DOMAIN,
+                relaySubdomain = BuildConfig.HEARTHLANE_RELAY_SUBDOMAIN,
             )
         }
     }

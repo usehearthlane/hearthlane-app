@@ -11,6 +11,9 @@ import org.hearthlane.core.connectivity.HttpStreamGetter
  */
 class TsnetStreamGetter(private val gateway: TsnetGateway) : HttpStreamGetter {
 
-    override suspend fun open(url: String, connectTimeoutMs: Long): HttpStream =
-        gateway.httpOpenStream(url, connectTimeoutMs)
+    override suspend fun open(
+        url: String,
+        connectTimeoutMs: Long,
+        headers: Map<String, String>,
+    ): HttpStream = gateway.httpOpenStream(url, connectTimeoutMs, headers)
 }

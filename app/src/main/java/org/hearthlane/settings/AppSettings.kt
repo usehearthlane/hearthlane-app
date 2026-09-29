@@ -29,7 +29,10 @@ private val Context.appSettingsDataStore by preferencesDataStore(name = "app_set
  *
  * The product configures a single environment: the [baseDomain] (for example
  * `hearthlane.omni.corp`). The Frigate and Relay endpoints are derived from it
- * by [HearthlaneEndpointResolver] and are never edited independently.
+ * by [HearthlaneEndpointResolver] and are never edited independently. The
+ * relay service label ([relaySubdomain]) is a per-build environment constant
+ * supplied by the flavor (`relay` for PROD, `relay-uat` for UAT); it is not a
+ * user setting, so it stays fixed for the life of the installed app.
  *
  * The [nodeSuffix] is the stable per-installation anchor of the embedded node
  * hostname: it is generated once on first run and reused forever, so the node
@@ -40,6 +43,7 @@ class AppSettings(
     private val dataStore: DataStore<Preferences>,
     private val defaultBaseDomain: String,
     private val scope: CoroutineScope,
+    private val relaySubdomain: String = RELAY_SUBDOMAIN_DEFAULT,
 ) {
     /** True once the persisted values have been loaded into the flows below. */
     private val _ready = MutableStateFlow(false)
@@ -163,7 +167,7 @@ class AppSettings(
     /** Recomputes the persisted domain and the derived endpoint flows. */
     private fun applyBaseDomain(domain: String) {
         _baseDomain.value = domain
-        val endpoints = HearthlaneEndpointResolver.resolve(domain)
+        val endpoints = HearthlaneEndpointResolver.resolve(domain, relaySubdomain)
         _frigateBaseUrl.value = endpoints?.frigateBaseUrl ?: ""
         _relayBaseUrl.value = endpoints?.relayBaseUrl ?: ""
     }
@@ -207,19 +211,24 @@ class AppSettings(
     }
 
     companion object {
+        /** Standard relay service label when no environment override applies. */
+        const val RELAY_SUBDOMAIN_DEFAULT = "relay"
+
         fun create(
             context: Context,
             defaultBaseDomain: String,
             scope: CoroutineScope,
+            relaySubdomain: String = RELAY_SUBDOMAIN_DEFAULT,
         ): AppSettings =
-            AppSettings(context.appSettingsDataStore, defaultBaseDomain, scope)
+            AppSettings(context.appSettingsDataStore, defaultBaseDomain, scope, relaySubdomain)
 
         /** Test-only factory: takes a caller-owned DataStore. */
         fun createForTest(
             dataStore: DataStore<Preferences>,
             defaultBaseDomain: String,
             scope: CoroutineScope,
-        ): AppSettings = AppSettings(dataStore, defaultBaseDomain, scope)
+            relaySubdomain: String = RELAY_SUBDOMAIN_DEFAULT,
+        ): AppSettings = AppSettings(dataStore, defaultBaseDomain, scope, relaySubdomain)
 
         /**
          * Stable embedded node hostname for a given persisted suffix. The

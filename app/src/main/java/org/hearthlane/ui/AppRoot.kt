@@ -1,5 +1,9 @@
 package org.hearthlane.ui
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import androidx.activity.compose.BackHandler
@@ -26,17 +30,22 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.SingletonImageLoader
 import org.hearthlane.BuildConfig
 import org.hearthlane.R
 import org.hearthlane.controller.CameraDiscoveryController
 import org.hearthlane.controller.DeviceNicknameSync
 import org.hearthlane.controller.EventDetailController
+import org.hearthlane.controller.EventDetailState
 import org.hearthlane.controller.FrigateConnectionController
 import org.hearthlane.controller.LocationSharingController
 import org.hearthlane.controller.LocationSharingStatus
 import org.hearthlane.controller.PlaybackSnapshotStore
 import org.hearthlane.controller.RecentEventsController
+import org.hearthlane.controller.RecentEventsState
 import org.hearthlane.controller.RelayConnectionController
 import org.hearthlane.controller.SettingsController
 import org.hearthlane.core.frigate.Camera
@@ -57,6 +66,8 @@ import org.hearthlane.setup.shouldShowSetup
 import org.hearthlane.tailscale.TsnetGatewayImpl
 import org.hearthlane.thumbnail.CameraThumbnailModelFactory
 import org.hearthlane.thumbnail.FrigateSnapshotImageLoader
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.hearthlane.ui.locations.LocationsScreen
 import org.hearthlane.ui.theme.HearthlaneTheme
@@ -80,11 +91,12 @@ import org.hearthlane.ui.theme.HearthlaneTheme
 fun AppRoot(
     stateDir: String,
     defaultBaseDomain: String,
+    relaySubdomain: String,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = remember {
-        AppSettings.create(context, defaultBaseDomain, scope)
+        AppSettings.create(context, defaultBaseDomain, scope, relaySubdomain)
     }
 
     val settingsReady by settings.ready.collectAsState()
@@ -140,6 +152,87 @@ fun AppRoot(
             settings = settings,
             relayClient = { relayController.client() },
         )
+    }
+
+    // Foreground tsnet lease is tied to the PROCESS being in the foreground,
+    // never to a specific screen. [ForegroundTsnetLifecycle] stops the
+    // foreground consumers and releases the foreground gateway's claim when the
+    // process leaves the foreground, so the node converges to STOPPED (the
+    // location publisher still acquires its own lease per remote publish).
+    // Returning to the foreground re-probes, which re-acquires the lease only
+    // when the remote path is still needed (LOCAL keeps the node stopped).
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Foreground resume recovery: every ON_START bumps the epoch and records
+    // the connection generation at that instant, so the per-destination
+    // recovery effects can wait for the transport to be re-established BEFORE
+    // re-running an interrupted load. Zero until the first lifecycle event; a
+    // real resume (after a background) is epoch >= 2.
+    var resumeEpoch by remember { mutableStateOf(0) }
+    var resumeStartGen by remember { mutableStateOf(0) }
+
+    val fgLifecycle = remember(gateway, controller, relayController, scope) {
+        ForegroundTsnetLifecycle(
+            gateway = gateway,
+            startConsumers = {
+                controller.start()
+                controller.connect(restartPlayback = false)
+                relayController.probe()
+            },
+            stopConsumers = {
+                controller.stopForBackground()
+                relayController.stopForBackground()
+            },
+            scope = scope,
+        )
+    }
+    DisposableEffect(fgLifecycle, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> fgLifecycle.onBackground()
+                Lifecycle.Event.ON_START -> {
+                    fgLifecycle.onForeground()
+                    // The resume connect launched above cannot complete before
+                    // this line, so the recorded generation is the pre-resume
+                    // one: the recovery waits for a strictly newer completion.
+                    resumeStartGen = controller.connectGeneration.value
+                    resumeEpoch++
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            // Safety net when the composition leaves without an ON_STOP (for
+            // example an activity destroy). Idempotent.
+            fgLifecycle.dispose()
+        }
+    }
+
+    // Screen-off / device lock: the device stopped being interactively used, so
+    // the foreground stack can be torn down well before the 60s background
+    // window. A dynamically registered receiver is lifecycle-safe (unregistered
+    // with the composition), never wakes the process (a manifest receiver
+    // would) and adds no polling or new service. Screen-off is NOT treated as
+    // app termination: the teardown is reversible by the normal recovery.
+    DisposableEffect(fgLifecycle, context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                    fgLifecycle.onScreenOff()
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        onDispose {
+            context.unregisterReceiver(receiver)
+        }
     }
 
     val baseUrl by settings.frigateBaseUrl.collectAsState()
@@ -262,6 +355,16 @@ fun AppRoot(
                     onDispose {
                         cameraDiscovery.stop()
                         controller.stop()
+                    }
+                }
+                // Foreground resume: once the transport is re-established, observe the
+                // camera grid for an Error the background tore down and recover
+                // it exactly once. A Loaded/Loading grid is never touched.
+                LaunchedEffect(resumeEpoch) {
+                    if (resumeEpoch < 2) return@LaunchedEffect
+                    controller.awaitConnectedAfterResume(resumeStartGen)
+                    awaitErrorAndRecover(cameraDiscovery.state, { it is CameraDiscoveryState.Error }) {
+                        cameraDiscovery.refresh()
                     }
                 }
                 HomeScreen(
@@ -412,6 +515,18 @@ fun AppRoot(
                         }
                         // Load the camera's recent events while the camera screen is shown.
                         LaunchedEffect(eventsController) { eventsController.loadInitial() }
+                        // Foreground resume: observe the recent-events state for an Error that the
+                        // background tore down (it can surface AFTER this
+                        // effect's first evaluation) and recover it exactly
+                        // once, only after the transport is re-established.
+                        // Loaded events are preserved.
+                        LaunchedEffect(resumeEpoch, eventsController) {
+                            if (resumeEpoch < 2) return@LaunchedEffect
+                            controller.awaitConnectedAfterResume(resumeStartGen)
+                            awaitErrorAndRecover(eventsController.state, { it is RecentEventsState.Error }) {
+                                eventsController.loadInitial()
+                            }
+                        }
                         LiveScreen(
                             cameraId = screen.cameraId,
                             displayName = camera!!.displayName,
@@ -476,6 +591,17 @@ fun AppRoot(
                         }
                         // Load the event when the screen is entered.
                         LaunchedEffect(detailController) { detailController.load() }
+                        // Foreground resume: observe the event-detail state for an Error the
+                        // background tore down — which can surface AFTER the
+                        // resume began — and recover it exactly once, only once
+                        // the transport is back. Loaded details are preserved.
+                        LaunchedEffect(resumeEpoch, detailController) {
+                            if (resumeEpoch < 2) return@LaunchedEffect
+                            controller.awaitConnectedAfterResume(resumeStartGen)
+                            awaitErrorAndRecover(detailController.state, { it is EventDetailState.Error }) {
+                                detailController.load()
+                            }
+                        }
                         EventDetailScreen(
                             controller = detailController,
                             thumbnailFactory = thumbnailFactory,
@@ -563,6 +689,28 @@ internal fun shouldRenderSetupScreen(setupComplete: Boolean, reason: String?): B
     !setupComplete ||
         reason == SetupRouteReasons.REMOTE_RECONFIGURE_USER_ACTION ||
         reason == SetupRouteReasons.USER_SERVER_SETTINGS
+
+/**
+ * Foreground-resume recovery primitive: waits for [state] to turn into an
+ * Error and runs [recover] exactly once. It reacts to the CURRENT value first
+ * and then to later emissions, so it is immune to the race where the
+ * background-interrupted request lands in Error AFTER a one-shot check already
+ * decided "nothing to recover". Loaded/Loading content never triggers
+ * anything, and the observation ends after the single recovery, so a genuine
+ * repeated failure is left to the user's Retry (no polling, no retry loop).
+ *
+ * The caller is expected to have already waited for the transport to be
+ * re-established ([FrigateConnectionController.awaitConnectedAfterResume]) and
+ * to be gated on a real foreground resume.
+ */
+internal suspend fun <T> awaitErrorAndRecover(
+    state: StateFlow<T>,
+    isError: (T) -> Boolean,
+    recover: () -> Unit,
+) {
+    state.first { isError(it) }
+    recover()
+}
 
 @Composable
 private fun ConnectingPlaceholder(text: String) {

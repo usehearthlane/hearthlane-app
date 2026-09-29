@@ -109,6 +109,9 @@ class EventDetailController(
     /** Starts (or replays/retries) playback of the event clip. */
     fun play() = playback.play()
 
+    /** Stops playback and releases the media source (used by the lifecycle pause). */
+    fun stop() = playback.stop()
+
     /** Releases the player. Call when the screen leaves. */
     fun release() = playback.release()
 }

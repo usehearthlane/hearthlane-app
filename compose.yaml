@@ -1,5 +1,5 @@
 services:
-  opencode:
+  workspace:
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,15 +9,18 @@ services:
 
     working_dir: /workspace
 
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     env_file:
       - ${HOME}/.config/opencode/9router.env
       - ${HOME}/.config/opencode/go.env
 
     environment:
-      HOME: /home/opencode
+      HOME: /home/agent
       TERM: xterm-256color
       COLORTERM: truecolor
-
+      
       DISPLAY: ${DISPLAY}
 
       SSH_AUTH_SOCK: /ssh-agent
@@ -33,26 +36,31 @@ services:
       RELEASE_KEY_PASSWORD: ${RELEASE_KEY_PASSWORD}
       GH_TOKEN: ${GH_TOKEN}
 
+      ADB_SERVER_SOCKET: tcp:host.docker.internal:5037
+
     volumes:
       # Current repository only.
-      - .:/workspace
+      - ${WORKSPACE_DIR:-.}:/workspace
 
       # Release
       - ${HOME}/.config/hearthlane/playstore.jks:/run/secrets/hearthlane_playstore.jks:ro
       
       # Shared OpenCode configuration.
-      - ${HOME}/.config/opencode:/home/opencode/.config/opencode
+      - ${HOME}/.config/opencode:/home/agent/.config/opencode
 
       # Persistent OpenCode sessions/data
-      - opencode-share:/home/opencode/.local/share/opencode
-      - opencode-state:/home/opencode/.local/state/opencode
+      - opencode-share:/home/agent/.local/share/opencode
+      - opencode-state:/home/agent/.local/state/opencode
+
+      # Persistent Codex
+      - ${HOME}/.config/codex:/home/agent/.codex
 
       # SSH agent only; private keys are not mounted.
       - ${SSH_AUTH_SOCK}:/ssh-agent
 
       # SSH aliases and known hosts.
-      - ${HOME}/.ssh/config:/home/opencode/.ssh/config:ro
-      - ${HOME}/.ssh/known_hosts:/home/opencode/.ssh/known_hosts:ro
+      - ${HOME}/.ssh/config:/home/agent/.ssh/config:ro
+      - ${HOME}/.ssh/known_hosts:/home/agent/.ssh/known_hosts:ro
 
       # X11 clipboard.
       - /tmp/.X11-unix:/tmp/.X11-unix:ro

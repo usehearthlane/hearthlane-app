@@ -1,6 +1,7 @@
 package org.hearthlane.core.playback
 
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
@@ -42,6 +43,7 @@ class HttpBytesDataSource(
     private val getter: HttpBytesGetter,
     private val timeoutMs: Long,
     private val onBytes: (Long) -> Unit = {},
+    private val diagLabel: String = "LIVE",
 ) : DataSource {
 
     private var result: HttpBytesResult? = null
@@ -108,7 +110,9 @@ class HttpBytesDataSource(
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (closed) return C.RESULT_END_OF_INPUT
-        if (bytesRead >= totalBytes) return C.RESULT_END_OF_INPUT
+        if (bytesRead >= totalBytes) {
+            return C.RESULT_END_OF_INPUT
+        }
         val body = result?.body ?: return C.RESULT_END_OF_INPUT
         val toRead = minOf(length.toLong(), totalBytes - bytesRead).toInt()
         val from = readOffset.toInt()

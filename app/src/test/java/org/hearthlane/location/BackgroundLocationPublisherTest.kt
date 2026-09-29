@@ -55,7 +55,7 @@ class BackgroundLocationPublisherTest {
         onPublishFailure: (() -> Unit)? = null,
     ) = BackgroundLocationPublisher(
         readLocation = read,
-        relayClient = { relay },
+        publish = { id, loc -> relay.publishLocation(id, loc) },
         deviceId = { "d1" },
         checkIntervalMs = { checkIntervalMs },
         scope = backgroundScope,
@@ -113,6 +113,36 @@ class BackgroundLocationPublisherTest {
         assertEquals(1, pub.state.value.publishCount)
         assertEquals(1.0, relay.getLocation("d1")!!.latitude, 0.0)
         assertFalse("a consumed publish leaves nothing pending", pub.state.value.hasPendingLocation)
+    }
+
+    @Test
+    fun `shouldPublish false never invokes the publish function`() = runTest {
+        val clock = Clock()
+        var publishes = 0
+        // A single fresh fix: the first cycle publishes (never published), then
+        // a stationary read produces no movement, so every later cycle must NOT
+        // invoke the publish function (the tsnet lifecycle is gated behind it).
+        var counter = 0
+        val pub = BackgroundLocationPublisher(
+            readLocation = {
+                counter++
+                if (counter == 1) sample(1.0, 100L) else sample(1.0, 100L)
+            },
+            publish = { _, _ -> publishes++; 204 },
+            deviceId = { "d1" },
+            checkIntervalMs = { 1_000L },
+            scope = backgroundScope,
+            distanceMeters = ::distanceMeters,
+            clockMs = { clock.ms },
+        )
+
+        pub.start()
+        runCurrent()
+        assertEquals(1, publishes)
+
+        tick(clock, 60_000L)
+        tick(clock, 60_000L)
+        assertEquals("no movement means no publish, hence no network touch", 1, publishes)
     }
 
     @Test

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- UAT flavor: visible name keeps the environment unmistakable even when
+         PROD (org.hearthlane) is installed side by side. -->
+    <string name="app_name">Hearthlane UAT</string>
+    <string name="environment_badge" translatable="false">UAT</string>
+</resources>

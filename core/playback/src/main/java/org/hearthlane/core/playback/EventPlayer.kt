@@ -44,15 +44,38 @@ class EventPlayer(
     private val _metrics = MutableStateFlow(PlayerMetrics())
     val metrics: StateFlow<PlayerMetrics> = _metrics.asStateFlow()
 
+    // TEMPORARY diagnostics: monotonic player generation shared with the
+    // data-source request ids so the logcat distinguishes a rebuffer inside a
+    // player from a full restart.
+    private val generation = VideoDiag.nextId()
+
     private var preparedAtMs = 0L
 
     private val listener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
-            _state.value = playbackStatusForState(playbackState, _state.value)
+            when (playbackState) {
+                Player.STATE_BUFFERING -> {
+                    VideoDiag.player("EVENT", "state BUFFERING generation=$generation")
+                    _state.value = PlaybackStatus.Loading
+                }
+                Player.STATE_READY -> {
+                    VideoDiag.player("EVENT", "state READY generation=$generation")
+                    _state.value = PlaybackStatus.Playing
+                }
+                Player.STATE_IDLE -> {
+                    VideoDiag.player("EVENT", "state IDLE generation=$generation")
+                    if (_state.value !is PlaybackStatus.Error) {
+                        _state.value = PlaybackStatus.Idle
+                    }
+                }
+                Player.STATE_ENDED -> _state.value = PlaybackStatus.Ended
+                else -> Unit
+            }
         }
 
         override fun onRenderedFirstFrame() {
             val elapsed = SystemClock.elapsedRealtime() - preparedAtMs
+            VideoDiag.player("EVENT", "first frame generation=$generation elapsed=${elapsed}ms")
             Log.i(TAG, "event playback first frame rendered ${elapsed}ms after play request")
             _metrics.update { it.copy(firstFrameElapsedMs = elapsed) }
         }
@@ -65,18 +88,25 @@ class EventPlayer(
                 cause,
             ).distinct().joinToString(": ")
             _metrics.update { it.copy(errorCount = it.errorCount + 1) }
+            VideoDiag.playerError(
+                "EVENT",
+                "player error generation=$generation count=${_metrics.value.errorCount}",
+                error,
+            )
             Log.e(TAG, "event playback error: $message", error)
             _state.value = PlaybackStatus.Error(message, httpStatusFrom(error))
         }
     }
 
     init {
+        VideoDiag.player("EVENT", "player created generation=$generation getter=${getter::class.simpleName}")
         player.addListener(listener)
     }
 
     /** Starts (or replaces) playback of [clipUrl]. Call [release] when done. */
     fun play(clipUrl: String) {
         preparedAtMs = SystemClock.elapsedRealtime()
+        VideoDiag.player("EVENT", "mediaSource set + prepare generation=$generation")
         Log.i(TAG, "event playback preparing via ${getter::class.simpleName}")
         val source = ProgressiveMediaSource.Factory(
             StreamingHttpDataSourceFactory(getter, connectTimeoutMs, this::onBytesTransferred),
@@ -95,11 +125,13 @@ class EventPlayer(
 
     /** Stops playback and releases the media source (no further requests). */
     fun stop() {
+        VideoDiag.player("EVENT", "stop generation=$generation")
         player.stop()
     }
 
     /** Releases the player and removes the listener. Call when the screen leaves. */
     fun release() {
+        VideoDiag.player("EVENT", "release generation=$generation")
         player.removeListener(listener)
         Log.i(
             TAG,

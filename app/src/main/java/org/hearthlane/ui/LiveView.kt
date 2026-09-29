@@ -49,12 +49,16 @@ import androidx.media3.ui.PlayerView
 import org.hearthlane.R
 import org.hearthlane.controller.PlaybackSnapshotStore
 import org.hearthlane.core.connectivity.HttpBytesGetter
+import org.hearthlane.core.connectivity.HttpStreamGetter
 import org.hearthlane.core.frigate.Go2RtcStreams
+import org.hearthlane.core.frigate.LiveStreamPreference
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.core.frigate.bytesGetterFor
+import org.hearthlane.core.frigate.streamGetterFor
 import org.hearthlane.core.playback.LiveStreamPlayer
 import org.hearthlane.core.playback.PlaybackStatus
+import org.hearthlane.core.playback.VideoDiag
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -90,15 +94,29 @@ internal fun LiveView(
     modifier: Modifier = Modifier,
     playbackSnapshotStore: PlaybackSnapshotStore? = null,
     testGetter: HttpBytesGetter? = null,
+    testStreamGetter: HttpStreamGetter? = null,
     fullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val getter = testGetter ?: remember(transport, gateway) { bytesGetterFor(transport, gateway) }
+    // Bytes getter: go2rtc stream discovery and master-playlist resolution
+    // (small, bounded JSON/playlist responses). Stream getter: the HLS player,
+    // which now consumes playlists/init/segments incrementally.
+    val bytesGetter = testGetter ?: remember(transport, gateway) { bytesGetterFor(transport, gateway) }
+    val streamGetter = testStreamGetter ?: remember(transport, gateway) { streamGetterFor(transport, gateway) }
+    // Holder set below, once discoverAndPlay is defined: the player detects a
+    // dead go2rtc session (MEDIA_PLAYLIST 404/410) and asks us to re-resolve.
+    var onSessionDeadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val player = remember(transport, gateway) {
         Log.i(TAG, "player created for transport=$transport")
-        LiveStreamPlayer(context.applicationContext, getter)
+        LiveStreamPlayer(
+            context.applicationContext,
+            streamGetter,
+            onSessionDead = { onSessionDeadAction?.invoke() },
+            liveTargetOffsetMs = if (transport == TransportKind.TAILSCALE) LIVE_TARGET_OFFSET_MS else null,
+            diagTransport = transport.name,
+        )
     }
     val scope = rememberCoroutineScope()
 
@@ -108,6 +126,7 @@ internal fun LiveView(
     val metrics by player.metrics.collectAsState()
     var resumeTick by remember { mutableStateOf(0) }
     var streamResolved by remember { mutableStateOf(false) }
+    var resolvedStreamName: String? by remember { mutableStateOf(null) }
     var recoveryCount by remember { mutableStateOf(0) }
     var autoRecovery by remember { mutableStateOf(0) }
     var playingSince by remember { mutableStateOf<Long?>(null) }
@@ -124,8 +143,14 @@ internal fun LiveView(
     DisposableEffect(lifecycleOwner, player) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> player.stop()
-                Lifecycle.Event.ON_RESUME -> resumeTick++
+                Lifecycle.Event.ON_STOP -> {
+                    VideoDiag.player("LIVE", "lifecycle ON_STOP")
+                    player.stop()
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    VideoDiag.player("LIVE", "lifecycle ON_RESUME")
+                    resumeTick++
+                }
                 else -> Unit
             }
         }
@@ -135,24 +160,47 @@ internal fun LiveView(
 
     var discoveryJob: Job? = null
     var discoveryRetryJob: Job? = null
+    var discoverCount by remember { mutableStateOf(0) }
     fun discoverAndPlay() {
         discoveryJob?.cancel()
         discoveryRetryJob?.cancel()
+        discoverCount++
+        val myCount = discoverCount
+        VideoDiag.player("LIVE", "discover begin generation=$myCount transport=$transport")
         discoveryJob = scope.launch {
             try {
                 unavailable = false
-                val streams = Go2RtcStreams(getter)
+                val streams = Go2RtcStreams(bytesGetter)
+                val preference =
+                    if (transport == TransportKind.TAILSCALE) LiveStreamPreference.REMOTE_SUB
+                    else LiveStreamPreference.MAIN
                 val name = if (streamResolved) {
-                    cameraId
+                    resolvedStreamName
                 } else {
-                    streams.streamNameForCamera(baseUrl, cameraId, STREAMS_TIMEOUT_MS)
+                    streams.streamNameForLive(baseUrl, cameraId, preference, STREAMS_TIMEOUT_MS)
                 }
                 if (name == null) {
                     unavailable = true
                 } else {
+                    val reason = when {
+                        preference == LiveStreamPreference.REMOTE_SUB && name == "${cameraId}_sub" ->
+                            "remote_substream"
+                        preference == LiveStreamPreference.REMOTE_SUB -> "substream_unavailable"
+                        else -> "local_main"
+                    }
+                    Log.i(
+                        TAG,
+                        "LiveStreamSelection camera=$cameraId transport=$transport selected=$name reason=$reason",
+                    )
                     val url = streams.resolveMediaPlaylistUrl(baseUrl, name, STREAMS_TIMEOUT_MS)
+                    // A newer discover may have superseded this one after the URL
+                    // resolved: never play from a stale generation (would create a
+                    // duplicate MediaSource/prepare and a second go2rtc session).
+                    if (isStaleDiscover(currentCount = discoverCount, myCount = myCount)) return@launch
+                    VideoDiag.player("LIVE", "discover complete generation=$myCount")
                     Log.i(TAG, "live stream resolved: camera=$cameraId stream=$name via $transport")
                     streamResolved = true
+                    resolvedStreamName = name
                     streamUrl = url
                     recoveryExhausted = false
                     player.play(url)
@@ -160,7 +208,9 @@ internal fun LiveView(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                VideoDiag.player("LIVE", "discover failed generation=$myCount")
                 streamResolved = false
+                resolvedStreamName = null
                 Log.e(TAG, "stream discovery failed", e)
                 val stable = playingSince?.let { SystemClock.elapsedRealtime() - it }
                 if (stable != null && stable > STABLE_PLAY_MS) autoRecovery = 0
@@ -185,6 +235,9 @@ internal fun LiveView(
             }
         }
     }
+    // Wire the player's early-session-recovery signal to the existing re-discover
+    // flow (same ExoPlayer is re-prepared with a fresh media source).
+    onSessionDeadAction = { discoverAndPlay() }
 
     var lastTransport by remember { mutableStateOf<TransportKind?>(null) }
     var lastResumeTick by remember { mutableStateOf(0) }
@@ -279,6 +332,7 @@ private fun LiveViewPortrait(
     onToggleFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var videoAspect by remember { mutableStateOf<Float?>(null) }
     Column(
         modifier = modifier.fillMaxWidth(),
     ) {
@@ -305,13 +359,14 @@ private fun LiveViewPortrait(
                             PlayerView(ctx).apply {
                                 useController = false
                                 setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                                setAspectRatioListener { target, _, _ -> videoAspect = target }
                                 setPlayer(player.player)
                             }
                         },
                         update = { view -> view.player = player.player },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 9f),
+                            .aspectRatio(videoAspect ?: 16f / 9f),
                     )
                     FullscreenToggle(
                         onClick = onToggleFullscreen,
@@ -457,3 +512,19 @@ private const val STREAMS_TIMEOUT_MS = 10_000L
 private const val MAX_AUTO_RECOVERY = 2
 private const val STABLE_PLAY_MS = 10_000L
 private const val DISCOVERY_RETRY_DELAY_MS = 1_500L
+
+/**
+ * Conservative live-edge margin applied ONLY on the remote (Tailscale) path:
+ * the player starts this far behind the live edge, giving real jitter margin
+ * (observed stalls ~0.5-0.9 s consume the ~0.2-2 s real window) without large
+ * latency. LOCAL stays on the default (minimal) offset.
+ */
+internal const val LIVE_TARGET_OFFSET_MS = 2_500L
+
+/**
+ * True when a discover attempt that resolved a URL was superseded by a newer
+ * [discoverAndPlay] (the generation counter advanced): the stale result must
+ * never call [LiveStreamPlayer.play], which would duplicate the MediaSource and
+ * create a second go2rtc session. Pure so it is unit-testable.
+ */
+internal fun isStaleDiscover(currentCount: Int, myCount: Int): Boolean = currentCount != myCount

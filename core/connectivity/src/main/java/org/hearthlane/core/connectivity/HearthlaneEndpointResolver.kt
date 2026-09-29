@@ -25,6 +25,11 @@ data class HearthlaneEndpoints(
  * plain HTTP (the environment is private: LAN or Tailscale) and never carry a
  * path prefix, so the relay contract (`/devices`, no `/v1`) and the native
  * Frigate paths (`/api/events`, ...) pass through untouched.
+ *
+ * The relay subdomain is a per-environment configuration value (for example
+ * `relay` in prod and `relay-uat` in UAT) supplied by the flavor, never
+ * duplicated across call sites. The default keeps the historical `relay.*`
+ * layout; callers that know a different relay label pass it explicitly.
  */
 object HearthlaneEndpointResolver {
 
@@ -60,12 +65,30 @@ object HearthlaneEndpointResolver {
         return s
     }
 
-    /** Derives both endpoints from a canonical base domain (see [normalizeBaseDomain]). */
-    fun resolve(baseDomain: String): HearthlaneEndpoints? {
+    /**
+     * Normalizes a service label (Frigate/relay subdomain) supplied as
+     * configuration. A service label is a single host label (letters, digits
+     * and hyphens), for example `relay` or `relay-uat`; it must never carry a
+     * scheme, path, port or whitespace.
+     */
+    fun normalizeServiceLabel(input: String): String? {
+        val label = input.trim().lowercase()
+        val valid = label.isNotEmpty() &&
+            label.length <= 63 &&
+            label.first().isLetterOrDigit() &&
+            label.last().isLetterOrDigit() &&
+            label.all { it.isLetterOrDigit() || it == '-' }
+        return label.takeIf { valid }
+    }
+
+    /** Derives both endpoints from a canonical base domain (see [normalizeBaseDomain]).
+     *  [relaySubdomain] selects which relay service label the environment uses. */
+    fun resolve(baseDomain: String, relaySubdomain: String = RELAY_SUBDOMAIN): HearthlaneEndpoints? {
         val normalized = normalizeBaseDomain(baseDomain) ?: return null
+        val relayLabel = normalizeServiceLabel(relaySubdomain) ?: return null
         return HearthlaneEndpoints(
             frigateBaseUrl = endpoint(FRIGATE_SUBDOMAIN, normalized),
-            relayBaseUrl = endpoint(RELAY_SUBDOMAIN, normalized),
+            relayBaseUrl = endpoint(relayLabel, normalized),
         )
     }
 
@@ -74,8 +97,11 @@ object HearthlaneEndpointResolver {
         normalizeBaseDomain(baseDomain)?.let { endpoint(FRIGATE_SUBDOMAIN, it) }
 
     /** Relay endpoint for a canonical base domain, or null when invalid. */
-    fun relayEndpoint(baseDomain: String): String? =
-        normalizeBaseDomain(baseDomain)?.let { endpoint(RELAY_SUBDOMAIN, it) }
+    fun relayEndpoint(baseDomain: String, relaySubdomain: String = RELAY_SUBDOMAIN): String? {
+        val normalized = normalizeBaseDomain(baseDomain) ?: return null
+        val relayLabel = normalizeServiceLabel(relaySubdomain) ?: return null
+        return endpoint(relayLabel, normalized)
+    }
 
     private fun endpoint(service: String, baseDomain: String): String =
         "$SCHEME://$service.$baseDomain"

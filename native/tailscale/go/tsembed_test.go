@@ -14,7 +14,6 @@ import (
 	urlpkg "net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -355,13 +354,14 @@ func TestHTTPEmptyBodyIsNeverNull(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	dial := func(ctx context.Context, ip netip.Addr, port int) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
+	client := newClient(dial)
 	// s is nil: resolveHost only touches the server for hostname lookups, and
 	// the test URL uses a literal IP (127.0.0.1), which passes through.
 	run := func(method, path, body string) (*HttpResult, error) {
-		return httpRequestInternal(method, srv.URL+path, "application/json", "", body, 2000, nil, dial)
+		return httpRequestInternal(method, srv.URL+path, "application/json", "", body, 2000, client)
 	}
 
 	t.Run("204 has a non-nil empty body", func(t *testing.T) {
@@ -1022,16 +1022,22 @@ func TestCacheKeyNormalization(t *testing.T) {
 
 // dialReal connects over the host network; used to drive openHttpStream against
 // httptest servers without a running node.
-func dialReal(ctx context.Context, ip netip.Addr, port int) (net.Conn, error) {
+func dialReal(ctx context.Context, network, addr string) (net.Conn, error) {
 	var d net.Dialer
-	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+	return d.DialContext(ctx, network, addr)
+}
+
+// realDialClient builds a client whose transport dials the host network, for
+// tests that exercise the request flow against httptest servers.
+func realDialClient() *http.Client {
+	return newClient(dialReal)
 }
 
 // openTestStream opens a stream against a live httptest server using the real
 // host dialer, so the whole request/stream flow is exercised.
 func openTestStream(t *testing.T, url string) *HttpStreamInfo {
 	t.Helper()
-	info, err := openHttpStream(url, 2000, nil, dialReal)
+	info, err := openHttpStream(url, "", 2000, realDialClient())
 	if err != nil {
 		t.Fatalf("openHttpStream: %v", err)
 	}
@@ -1175,10 +1181,10 @@ func TestReadChunkDeliversFinalBytesWithEOF(t *testing.T) {
 		// client reader must treat the clean close as the end of the body.
 	}()
 
-	dial := func(ctx context.Context, ip netip.Addr, port int) (net.Conn, error) {
+	client := newClient(func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial("tcp", ln.Addr().String())
-	}
-	info, err := openHttpStream("http://127.0.0.1:1/clip", 2000, nil, dial)
+	})
+	info, err := openHttpStream("http://127.0.0.1:1/clip", "", 2000, client)
 	if err != nil {
 		t.Fatalf("openHttpStream: %v", err)
 	}
@@ -1276,14 +1282,14 @@ func TestStreamHTTPErrorPreservesStatus(t *testing.T) {
 
 func TestStreamTransportErrorIsReturned(t *testing.T) {
 	// A dial to a closed port must surface as a transport error on Open.
-	_, err := openHttpStream("http://127.0.0.1:1/clip", 500, nil, dialReal)
+	_, err := openHttpStream("http://127.0.0.1:1/clip", "", 500, realDialClient())
 	if err == nil {
 		t.Fatal("openHttpStream to a closed port must return an error")
 	}
 }
 
 func TestOpenHttpStreamRequiresRunningNode(t *testing.T) {
-	if _, err := OpenHttpStream("http://frigate:5000/api/events/x/clip.mp4", 1000); err == nil {
+	if _, err := OpenHttpStream("http://frigate:5000/api/events/x/clip.mp4", "", 1000); err == nil {
 		t.Fatal("OpenHttpStream must fail when the node is not running")
 	}
 }
@@ -1415,5 +1421,128 @@ func TestStreamConcurrentReadsAreSerialized(t *testing.T) {
 	wg.Wait()
 	if total.Load() != bodySize {
 		t.Fatalf("concurrent reads produced %d bytes, want %d", total.Load(), bodySize)
+	}
+}
+
+// --- Shared transport / connection reuse tests ---
+
+// TestSharedClientReusesConnectionsAcrossStreams proves the fix for HLS: with a
+// shared http.Client, sequential streams to the same host reuse the pooled
+// connection instead of dialing again. This is exactly what the Live HLS path
+// needs (one request per playlist/init/segment) and what httpClientFor provides
+// in production.
+func TestSharedClientReusesConnectionsAcrossStreams(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("alpha"))
+	})
+	mux.HandleFunc("/b", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("beta"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var dials atomic.Int32
+	client := newClient(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return dialReal(ctx, network, addr)
+	})
+
+	// First stream: fully read and closed, so the connection returns to the
+	// pool.
+	infoA, err := openHttpStream(srv.URL+"/a", "", 2000, client)
+	if err != nil {
+		t.Fatalf("open /a: %v", err)
+	}
+	for {
+		res, err := ReadChunk(infoA.Id, 1024)
+		if err != nil {
+			t.Fatalf("read /a: %v", err)
+		}
+		if res.EOF {
+			break
+		}
+	}
+	if err := CloseStream(infoA.Id); err != nil {
+		t.Fatalf("close /a: %v", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("first stream dialed %d times, want 1", got)
+	}
+
+	// Second stream: the pooled connection is reused, no new dial.
+	infoB, err := openHttpStream(srv.URL+"/b", "", 2000, client)
+	if err != nil {
+		t.Fatalf("open /b: %v", err)
+	}
+	for {
+		res, err := ReadChunk(infoB.Id, 1024)
+		if err != nil {
+			t.Fatalf("read /b: %v", err)
+		}
+		if res.EOF {
+			break
+		}
+	}
+	if err := CloseStream(infoB.Id); err != nil {
+		t.Fatalf("close /b: %v", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("second stream dialed %d times, want 1 (connection reused)", got)
+	}
+}
+
+// TestHttpClientForIsPerNodeAndCleared proves the shared client is scoped to
+// the exact node: repeated use reuses it, a different node gets a fresh one,
+// and clearHTTPClient forces a fresh one (so a restarted node never reuses a
+// transport bound to a previous node's netstack).
+func TestHttpClientForIsPerNodeAndCleared(t *testing.T) {
+	s1 := &tsnet.Server{}
+	s2 := &tsnet.Server{}
+
+	c1 := httpClientFor(s1)
+	c2 := httpClientFor(s1)
+	if c1 != c2 {
+		t.Fatal("the same node must reuse the same shared client")
+	}
+
+	c3 := httpClientFor(s2)
+	if c3 == c1 {
+		t.Fatal("a different node must get a fresh client/transport")
+	}
+
+	clearHTTPClient()
+	c4 := httpClientFor(s1)
+	if c4 == c1 {
+		t.Fatal("after clearHTTPClient a fresh client must be created")
+	}
+}
+
+// TestOpenHttpStreamPropagatesHeadersAndContentLength proves the streaming open
+// accepts request headers and surfaces Content-Length when the server provides
+// it — required for HLS segments and for the DataSource to report a known
+// length to Media3.
+func TestOpenHttpStreamPropagatesHeadersAndContentLength(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Diag") != "abc" {
+			t.Errorf("X-Diag header = %q, want abc", r.Header.Get("X-Diag"))
+		}
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("moov"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	info, err := openHttpStream(srv.URL+"/clip", `{"X-Diag":"abc"}`, 2000, realDialClient())
+	if err != nil {
+		t.Fatalf("openHttpStream: %v", err)
+	}
+	defer CloseStream(info.Id)
+	if info.ContentLength != 4 {
+		t.Fatalf("ContentLength = %d, want 4", info.ContentLength)
 	}
 }
