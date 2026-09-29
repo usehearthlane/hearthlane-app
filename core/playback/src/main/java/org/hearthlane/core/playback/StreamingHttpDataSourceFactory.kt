@@ -17,12 +17,13 @@ class StreamingHttpDataSourceFactory(
     private val getter: HttpStreamGetter,
     private val connectTimeoutMs: Long,
     private val onBytes: (Long) -> Unit = {},
+    private val onReadStall: () -> Unit = {},
     private val diagLabel: String = "EVENT",
     private val transferListener: TransferListener? = null,
 ) : DataSource.Factory {
 
     override fun createDataSource(): DataSource =
-        StreamingHttpDataSource(getter, connectTimeoutMs, onBytes, diagLabel).apply {
+        StreamingHttpDataSource(getter, connectTimeoutMs, onBytes, onReadStall, diagLabel).apply {
             transferListener?.let { addTransferListener(it) }
         }
 }

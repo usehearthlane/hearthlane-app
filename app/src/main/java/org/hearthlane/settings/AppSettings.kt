@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import org.hearthlane.core.connectivity.HearthlaneEndpointResolver
+import org.hearthlane.core.frigate.LiveQualityMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -88,6 +89,13 @@ class AppSettings(
     private val _deviceNickname = MutableStateFlow("")
     val deviceNickname: StateFlow<String> = _deviceNickname.asStateFlow()
 
+    /** Live quality preference: AUTO adapts the live stream remotely, HIGH
+     *  always uses the main stream, ECONOMY prefers the substream. Defaults to
+     *  AUTO; AUTO starts on the substream remotely, so existing remote users
+     *  keep today's behavior until the policy finds reason to upgrade. */
+    private val _liveQualityMode = MutableStateFlow(LiveQualityMode.AUTO)
+    val liveQualityMode: StateFlow<LiveQualityMode> = _liveQualityMode.asStateFlow()
+
     init {
         scope.launch {
             val prefs = dataStore.data.first()
@@ -125,6 +133,10 @@ class AppSettings(
             _autoPlayEventClips.value = prefs[AUTO_PLAY_EVENT_CLIPS] ?: true
 
             _deviceNickname.value = prefs[DEVICE_NICKNAME]?.takeIf { it.isNotBlank() } ?: ""
+
+            _liveQualityMode.value = prefs[LIVE_QUALITY_MODE]
+                ?.let { runCatching { LiveQualityMode.valueOf(it) }.getOrNull() }
+                ?: LiveQualityMode.AUTO
 
             // The relay MVP has no application authentication; a token persisted
             // by an older build is dead configuration and is removed safely.
@@ -210,6 +222,12 @@ class AppSettings(
         dataStore.edit { it[DEVICE_NICKNAME] = trimmed }
     }
 
+    /** Persists the live quality preference. */
+    suspend fun setLiveQualityMode(mode: LiveQualityMode) {
+        _liveQualityMode.value = mode
+        dataStore.edit { it[LIVE_QUALITY_MODE] = mode.name }
+    }
+
     companion object {
         /** Standard relay service label when no environment override applies. */
         const val RELAY_SUBDOMAIN_DEFAULT = "relay"
@@ -253,6 +271,7 @@ class AppSettings(
         private val NODE_SUFFIX = stringPreferencesKey("node_hostname_suffix")
         private val SETUP_COMPLETE = booleanPreferencesKey("setup_complete")
         private val AUTO_PLAY_EVENT_CLIPS = booleanPreferencesKey("auto_play_event_clips")
+        private val LIVE_QUALITY_MODE = stringPreferencesKey("live_quality_mode")
 
         /** Legacy two-URL keys removed by the endpoint-abstraction migration. */
         private val BASE_URL = stringPreferencesKey("frigate_base_url")

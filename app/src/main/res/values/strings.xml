@@ -74,6 +74,13 @@
 
     <string name="settings_section_playback">Playback</string>
     <string name="settings_autoplay_event_clips">Play event clips automatically</string>
+    <string name="settings_live_quality">Live quality</string>
+    <string name="settings_live_quality_auto">Auto</string>
+    <string name="settings_live_quality_auto_desc">Adjusts the quality automatically</string>
+    <string name="settings_live_quality_high">High</string>
+    <string name="settings_live_quality_high_desc">Maximum camera quality</string>
+    <string name="settings_live_quality_economy">Economy</string>
+    <string name="settings_live_quality_economy_desc">Lower bandwidth usage</string>
 
     <string name="settings_section_location">Location</string>
     <string name="settings_location_sharing">Share my location with family</string>

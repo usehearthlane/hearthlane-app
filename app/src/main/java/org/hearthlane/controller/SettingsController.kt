@@ -1,6 +1,7 @@
 package org.hearthlane.controller
 
 import org.hearthlane.core.frigate.FrigateConnection
+import org.hearthlane.core.frigate.LiveQualityMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +38,7 @@ data class SettingsState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.Unavailable,
     val autoPlayEventClips: Boolean = true,
     val locationSharingEnabled: Boolean = false,
+    val liveQualityMode: LiveQualityMode = LiveQualityMode.AUTO,
     val appVersion: String,
     val appBuild: String,
 )
@@ -57,11 +59,13 @@ class SettingsController(
     connecting: StateFlow<Boolean>,
     autoPlayEventClips: StateFlow<Boolean>,
     locationSharingEnabled: StateFlow<Boolean>,
+    liveQualityMode: StateFlow<LiveQualityMode>,
     appVersion: String,
     appBuild: String,
     private val resetRemoteAccessAction: () -> Unit,
     private val setAutoPlayEventClipsAction: suspend (Boolean) -> Unit,
     private val setLocationSharingEnabledAction: suspend (Boolean) -> Unit,
+    private val setLiveQualityModeAction: suspend (LiveQualityMode) -> Unit,
     private val scope: CoroutineScope,
 ) {
 
@@ -71,6 +75,7 @@ class SettingsController(
             connectionStatus = deriveConnectionStatus(connection.value, connecting.value),
             autoPlayEventClips = autoPlayEventClips.value,
             locationSharingEnabled = locationSharingEnabled.value,
+            liveQualityMode = liveQualityMode.value,
             appVersion = appVersion,
             appBuild = appBuild,
         ),
@@ -80,22 +85,27 @@ class SettingsController(
     private var collectJob: Job? = null
 
     init {
+        // combine() has no typed overload beyond 5 flows: the five base flows
+        // build the state first, then the live quality mode is layered on.
+        val base = combine(
+            baseDomain,
+            connection,
+            connecting,
+            autoPlayEventClips,
+            locationSharingEnabled,
+        ) { domain, conn, isConnecting, autoPlay, sharing ->
+            SettingsState(
+                baseDomain = domain,
+                connectionStatus = deriveConnectionStatus(conn, isConnecting),
+                autoPlayEventClips = autoPlay,
+                locationSharingEnabled = sharing,
+                appVersion = appVersion,
+                appBuild = appBuild,
+            )
+        }
         collectJob = scope.launch {
-            combine(
-                baseDomain,
-                connection,
-                connecting,
-                autoPlayEventClips,
-                locationSharingEnabled,
-            ) { domain, conn, isConnecting, autoPlay, sharing ->
-                SettingsState(
-                    baseDomain = domain,
-                    connectionStatus = deriveConnectionStatus(conn, isConnecting),
-                    autoPlayEventClips = autoPlay,
-                    locationSharingEnabled = sharing,
-                    appVersion = appVersion,
-                    appBuild = appBuild,
-                )
+            combine(base, liveQualityMode) { state, quality ->
+                state.copy(liveQualityMode = quality)
             }.collect { _state.value = it }
         }
     }
@@ -115,6 +125,14 @@ class SettingsController(
      */
     fun setLocationSharingEnabled(enabled: Boolean) {
         scope.launch { setLocationSharingEnabledAction(enabled) }
+    }
+
+    /**
+     * Persists the live quality preference. Applies to future Live sessions;
+     * a playback already in progress keeps its current mode.
+     */
+    fun setLiveQualityMode(mode: LiveQualityMode) {
+        scope.launch { setLiveQualityModeAction(mode) }
     }
 
     /**

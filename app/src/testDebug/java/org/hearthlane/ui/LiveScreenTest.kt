@@ -12,6 +12,7 @@ import org.hearthlane.core.connectivity.HttpBytesGetter
 import org.hearthlane.core.connectivity.HttpBytesResult
 import org.hearthlane.core.frigate.FrigateConnection
 import org.hearthlane.core.frigate.FrigateEventApi
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.test.FakeTsnetGateway
@@ -123,6 +124,7 @@ class LiveScreenTest {
             transport = TransportKind.TAILSCALE,
             connectAttempt = 1,
             networkTick = 0,
+            qualityMode = LiveQualityMode.AUTO,
             eventsController = events,
             thumbnailFactory = factory,
             snapshotImageLoader = imageLoader,

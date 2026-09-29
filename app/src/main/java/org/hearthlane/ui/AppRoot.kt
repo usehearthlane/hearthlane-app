@@ -237,6 +237,7 @@ fun AppRoot(
 
     val baseUrl by settings.frigateBaseUrl.collectAsState()
     val baseDomain by settings.baseDomain.collectAsState()
+    val liveQualityMode by settings.liveQualityMode.collectAsState()
 
     // Location-sharing flow owner: created at the composition root so both the
     // Settings screen (permission flow) and the Locations map (active cadence)
@@ -423,6 +424,7 @@ fun AppRoot(
                         connecting = controller.connecting,
                         autoPlayEventClips = settings.autoPlayEventClips,
                         locationSharingEnabled = settings.locationSharingEnabled,
+                        liveQualityMode = settings.liveQualityMode,
                         appVersion = BuildConfig.VERSION_NAME,
                         appBuild = BuildConfig.VERSION_CODE.toString(),
                         resetRemoteAccessAction = { controller.resetTailscale() },
@@ -431,6 +433,9 @@ fun AppRoot(
                         },
                         setLocationSharingEnabledAction = { enabled ->
                             settings.setLocationSharingEnabled(enabled)
+                        },
+                        setLiveQualityModeAction = { mode ->
+                            settings.setLiveQualityMode(mode)
                         },
                         scope = scope,
                     )
@@ -535,6 +540,7 @@ fun AppRoot(
                             transport = conn.transport,
                             connectAttempt = connectAttempt,
                             networkTick = networkTick,
+                            qualityMode = liveQualityMode,
                             eventsController = eventsController,
                             thumbnailFactory = thumbnailFactory,
                             snapshotImageLoader = snapshotImageLoader,

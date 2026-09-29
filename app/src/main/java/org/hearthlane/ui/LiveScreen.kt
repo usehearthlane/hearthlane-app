@@ -40,6 +40,7 @@ import coil3.ImageLoader
 import org.hearthlane.R
 import org.hearthlane.controller.PlaybackSnapshotStore
 import org.hearthlane.controller.RecentEventsController
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.thumbnail.CameraThumbnailModelFactory
@@ -64,6 +65,7 @@ internal fun LiveScreen(
     transport: TransportKind,
     connectAttempt: Int,
     networkTick: Int,
+    qualityMode: LiveQualityMode,
     eventsController: RecentEventsController,
     thumbnailFactory: CameraThumbnailModelFactory,
     snapshotImageLoader: ImageLoader,
@@ -122,6 +124,7 @@ internal fun LiveScreen(
                 baseUrl = baseUrl,
                 gateway = gateway,
                 transport = transport,
+                qualityMode = qualityMode,
                 connectAttempt = connectAttempt,
                 networkTick = networkTick,
                 modifier = Modifier.fillMaxSize(),
@@ -172,6 +175,7 @@ internal fun LiveScreen(
                     transport = transport,
                     connectAttempt = connectAttempt,
                     networkTick = networkTick,
+                    qualityMode = qualityMode,
                     modifier = Modifier.fillMaxWidth(),
                     playbackSnapshotStore = playbackSnapshotStore,
                     fullscreen = false,

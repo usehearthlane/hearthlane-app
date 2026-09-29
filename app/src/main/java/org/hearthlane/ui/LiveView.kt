@@ -50,15 +50,25 @@ import org.hearthlane.R
 import org.hearthlane.controller.PlaybackSnapshotStore
 import org.hearthlane.core.connectivity.HttpBytesGetter
 import org.hearthlane.core.connectivity.HttpStreamGetter
+import org.hearthlane.core.frigate.CameraStreams
 import org.hearthlane.core.frigate.Go2RtcStreams
-import org.hearthlane.core.frigate.LiveStreamPreference
+import org.hearthlane.core.frigate.LiveQualityLevel
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.core.frigate.bytesGetterFor
+import org.hearthlane.core.frigate.cameraStreamSelection
+import org.hearthlane.core.frigate.initialQualityLevel
 import org.hearthlane.core.frigate.streamGetterFor
+import org.hearthlane.core.frigate.streamNameForQualityLevel
+import org.hearthlane.core.playback.LiveQualityAction
+import org.hearthlane.core.playback.LiveQualityDowngradeReason
+import org.hearthlane.core.playback.LiveQualityPolicy
+import org.hearthlane.core.playback.LiveQualityState
 import org.hearthlane.core.playback.LiveStreamPlayer
 import org.hearthlane.core.playback.PlaybackStatus
 import org.hearthlane.core.playback.VideoDiag
+import org.hearthlane.core.playback.transitionOnPlaying
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -96,6 +106,7 @@ internal fun LiveView(
     testGetter: HttpBytesGetter? = null,
     testStreamGetter: HttpStreamGetter? = null,
     fullscreen: Boolean = false,
+    qualityMode: LiveQualityMode = LiveQualityMode.AUTO,
     onToggleFullscreen: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -105,17 +116,43 @@ internal fun LiveView(
     // which now consumes playlists/init/segments incrementally.
     val bytesGetter = testGetter ?: remember(transport, gateway) { bytesGetterFor(transport, gateway) }
     val streamGetter = testStreamGetter ?: remember(transport, gateway) { streamGetterFor(transport, gateway) }
+    val remote = transport == TransportKind.TAILSCALE
+
+    // AUTO quality machine (remote only): a fresh policy per logical session
+    // (transport or mode change), so a reopen/transport change re-allows a
+    // trial while an internal HLS recovery never mints new trials.
+    val policy = remember(transport, qualityMode) {
+        Log.i(TAG, "quality policy created mode=$qualityMode remote=$remote")
+        LiveQualityPolicy(nowMs = SystemClock::elapsedRealtime)
+    }
+    var cameraStreams by remember(transport) { mutableStateOf<CameraStreams?>(null) }
+    var qualityActive by remember { mutableStateOf(false) }
+    var startupInProgress by remember(transport) { mutableStateOf(false) }
+    var loadingStartedAtMs by remember { mutableStateOf(-1L) }
+
     // Holder set below, once discoverAndPlay is defined: the player detects a
     // dead go2rtc session (MEDIA_PLAYLIST 404/410) and asks us to re-resolve.
     var onSessionDeadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    // Holder for the quality action handler, set after its declaration below:
+    // the player callbacks (created earlier) route through it to break the
+    // player <-> handler declaration cycle.
+    var qualityActionHandler: ((LiveQualityAction) -> Unit)? = null
     val player = remember(transport, gateway) {
         Log.i(TAG, "player created for transport=$transport")
         LiveStreamPlayer(
             context.applicationContext,
             streamGetter,
             onSessionDead = { onSessionDeadAction?.invoke() },
-            liveTargetOffsetMs = if (transport == TransportKind.TAILSCALE) LIVE_TARGET_OFFSET_MS else null,
+            liveTargetOffsetMs = if (remote) LIVE_TARGET_OFFSET_MS else null,
             diagTransport = transport.name,
+            onMediaSegmentLoaded = { bytes, durationMs ->
+                if (qualityActive) qualityActionHandler?.invoke(policy.onMediaSegmentSample(bytes, durationMs))
+            },
+            onPlaylistPolled = { gapMs ->
+                if (qualityActive) qualityActionHandler?.invoke(policy.onPlaylistPolled(gapMs))
+            },
+            onReadStall = { if (qualityActive) policy.onReadStall() },
+            onLoadError = { if (qualityActive) qualityActionHandler?.invoke(policy.onLoadError()) },
         )
     }
     val scope = rememberCoroutineScope()
@@ -160,8 +197,50 @@ internal fun LiveView(
 
     var discoveryJob: Job? = null
     var discoveryRetryJob: Job? = null
+    var qualitySwitchJob: Job? = null
+    var qualitySwitchCount = 0
     var discoverCount by remember { mutableStateOf(0) }
-    fun discoverAndPlay() {
+
+    /**
+     * The quality level the live view should be on right now: the AUTO
+     * policy's state when armed (AUTO + remote + substream present), the
+     * mode's initial level otherwise. The discovery and quality switches both
+     * resolve streams through this, so an HLS session recovery re-plays the
+     * CURRENT level instead of resetting it.
+     */
+    val currentQualityLevel: () -> LiveQualityLevel = {
+        if (!qualityActive) initialQualityLevel(qualityMode, remote) else when (policy.state) {
+            LiveQualityState.SUB -> LiveQualityLevel.SUB
+            LiveQualityState.TRIAL_MAIN, LiveQualityState.MAIN -> LiveQualityLevel.MAIN
+        }
+    }
+
+    // Holder set after switchQuality is declared below: startPlayback's
+    // corrective pass routes through it (declaration-order breaker).
+    var correctiveSwitch: ((LiveQualityLevel) -> Unit)? = null
+    // Holder for the discovery retry (the retry lambda cannot reference the
+    // discoverAndPlay val inside its own initializer).
+    var retryDiscover: (() -> Unit)? = null
+
+    /** Plays [url] (a fresh go2rtc session) and notifies the quality policy.
+     *  A corrective switch re-aligns the playback if the policy level moved
+     *  while the URL was being resolved. */
+    val startPlayback: (String, LiveQualityLevel) -> Unit = { url, level ->
+        startupInProgress = true
+        loadingStartedAtMs = -1
+        policy.onSessionPreparing()
+        player.play(url)
+        if (qualityActive && currentQualityLevel() != level) {
+            Log.i(
+                TAG,
+                "LiveQuality mode=AUTO camera=$cameraId corrective-switch fromLevel=$level " +
+                    "toLevel=${currentQualityLevel()}",
+            )
+            correctiveSwitch?.invoke(currentQualityLevel())
+        }
+    }
+
+    val discoverAndPlay: () -> Unit = {
         discoveryJob?.cancel()
         discoveryRetryJob?.cancel()
         discoverCount++
@@ -171,22 +250,24 @@ internal fun LiveView(
             try {
                 unavailable = false
                 val streams = Go2RtcStreams(bytesGetter)
-                val preference =
-                    if (transport == TransportKind.TAILSCALE) LiveStreamPreference.REMOTE_SUB
-                    else LiveStreamPreference.MAIN
-                val name = if (streamResolved) {
-                    resolvedStreamName
-                } else {
-                    streams.streamNameForLive(baseUrl, cameraId, preference, STREAMS_TIMEOUT_MS)
+                val available = streams.streamNames(baseUrl, STREAMS_TIMEOUT_MS)
+                val selection = cameraStreamSelection(cameraId, available)
+                cameraStreams = selection
+                val wasActive = qualityActive
+                qualityActive = qualityMode == LiveQualityMode.AUTO && remote && selection?.sub != null
+                if (!wasActive && qualityActive) {
+                    Log.i(TAG, "LiveQuality mode=AUTO camera=$cameraId state=SUB")
                 }
+                val level = currentQualityLevel()
+                val name = selection?.let { streamNameForQualityLevel(cameraId, available, level) }
                 if (name == null) {
                     unavailable = true
                 } else {
                     val reason = when {
-                        preference == LiveStreamPreference.REMOTE_SUB && name == "${cameraId}_sub" ->
-                            "remote_substream"
-                        preference == LiveStreamPreference.REMOTE_SUB -> "substream_unavailable"
-                        else -> "local_main"
+                        !remote -> "local_main"
+                        name == selection?.sub -> "remote_substream"
+                        level == LiveQualityLevel.SUB -> "substream_unavailable"
+                        else -> "remote_main"
                     }
                     Log.i(
                         TAG,
@@ -203,7 +284,7 @@ internal fun LiveView(
                     resolvedStreamName = name
                     streamUrl = url
                     recoveryExhausted = false
-                    player.play(url)
+                    startPlayback(url, level)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -214,20 +295,20 @@ internal fun LiveView(
                 Log.e(TAG, "stream discovery failed", e)
                 val stable = playingSince?.let { SystemClock.elapsedRealtime() - it }
                 if (stable != null && stable > STABLE_PLAY_MS) autoRecovery = 0
-                val canRecover = transport == TransportKind.TAILSCALE || autoRecovery < MAX_AUTO_RECOVERY
+                val canRecover = remote || autoRecovery < MAX_AUTO_RECOVERY
                 if (canRecover) {
                     val attempt = autoRecovery + 1
-                    if (transport != TransportKind.TAILSCALE) autoRecovery++
+                    if (!remote) autoRecovery++
                     recoveryCount++
                     discoveryRetryJob?.cancel()
                     discoveryRetryJob = scope.launch {
                         Log.w(
                             TAG,
                             "stream discovery failed; retrying in ${DISCOVERY_RETRY_DELAY_MS}ms " +
-                                "(${if (transport == TransportKind.TAILSCALE) "unbounded TAILSCALE recovery" else "attempt $attempt/$MAX_AUTO_RECOVERY"})",
+                                "(${if (remote) "unbounded TAILSCALE recovery" else "attempt $attempt/$MAX_AUTO_RECOVERY"})",
                         )
                         delay(DISCOVERY_RETRY_DELAY_MS)
-                        discoverAndPlay()
+                        retryDiscover?.invoke()
                     }
                 } else {
                     recoveryExhausted = true
@@ -235,9 +316,100 @@ internal fun LiveView(
             }
         }
     }
+
+    /** Deliberate quality switch: resolves a fresh session for [level] and
+     *  re-prepares the SAME player. Never counts as a recovery, never touches
+     *  the recovery counters, and skips when a discovery superseded it. */
+    val switchQuality: (LiveQualityLevel) -> Unit = { level ->
+        qualitySwitchJob?.cancel()
+        qualitySwitchCount++
+        val mySwitch = qualitySwitchCount
+        val myDiscover = discoverCount
+        VideoDiag.player("LIVE", "quality switch begin level=$level")
+        qualitySwitchJob = scope.launch {
+            try {
+                val streams = Go2RtcStreams(bytesGetter)
+                val available = streams.streamNames(baseUrl, STREAMS_TIMEOUT_MS)
+                val name = streamNameForQualityLevel(cameraId, available, level)
+                if (name == null) {
+                    unavailable = true
+                    return@launch
+                }
+                val url = streams.resolveMediaPlaylistUrl(baseUrl, name, STREAMS_TIMEOUT_MS)
+                if (discoverCount != myDiscover || qualitySwitchCount != mySwitch) return@launch
+                VideoDiag.player("LIVE", "quality switch complete level=$level stream=$name")
+                streamResolved = true
+                resolvedStreamName = name
+                streamUrl = url
+                startPlayback(url, level)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                VideoDiag.player("LIVE", "quality switch failed level=$level")
+                Log.e(TAG, "quality switch failed; re-discovering", e)
+                discoverAndPlay()
+            }
+        }
+    }
+
+    /** Executes a policy action: switches streams or commits a state change. */
+    val handleQualityAction: (LiveQualityAction) -> Unit = { action ->
+        val mainName = cameraStreams?.main
+        val subName = cameraStreams?.sub
+        when (action) {
+            LiveQualityAction.None -> Unit
+            LiveQualityAction.TrialReady -> {
+                // Never compete with the early session recovery: the recovery
+                // re-resolves the current level; the trial waits for it.
+                if (!player.isRecoveryInFlight) {
+                    policy.onTrialStarted()
+                    Log.i(
+                        TAG,
+                        "LiveQuality mode=AUTO camera=$cameraId from=$subName to=$mainName reason=trial-started",
+                    )
+                    switchQuality(LiveQualityLevel.MAIN)
+                }
+            }
+            LiveQualityAction.TrialPassed -> {
+                policy.onTrialPassed()
+                Log.i(
+                    TAG,
+                    "LiveQuality mode=AUTO camera=$cameraId state=MAIN reason=trial-passed",
+                )
+            }
+            is LiveQualityAction.Downgrade -> {
+                Log.i(
+                    TAG,
+                    "LiveQuality mode=AUTO camera=$cameraId from=${resolvedStreamName} to=$subName " +
+                        "reason=${action.reason.name.lowercase()}",
+                )
+                if (policy.trialFailed) {
+                    Log.i(
+                        TAG,
+                        "LiveQuality mode=AUTO camera=$cameraId state=SUB reason=trial-failed " +
+                            "attempts_exhausted=${policy.attemptsExhausted}",
+                    )
+                }
+                // A session-dead downgrade is followed by the early-session
+                // recovery, which re-plays the (already downgraded) SUB level;
+                // the other reasons switch right now.
+                if (action.reason != LiveQualityDowngradeReason.SESSION_DEAD) {
+                    switchQuality(LiveQualityLevel.SUB)
+                }
+            }
+        }
+    }
+    qualityActionHandler = handleQualityAction
+    correctiveSwitch = switchQuality
+    retryDiscover = discoverAndPlay
+
     // Wire the player's early-session-recovery signal to the existing re-discover
-    // flow (same ExoPlayer is re-prepared with a fresh media source).
-    onSessionDeadAction = { discoverAndPlay() }
+    // flow (same ExoPlayer is re-prepared with a fresh media source). The policy
+    // downgrades first: the recovery then re-plays the new SUB level.
+    onSessionDeadAction = {
+        if (qualityActive) handleQualityAction(policy.onSessionDeadCandidate())
+        discoverAndPlay()
+    }
 
     var lastTransport by remember { mutableStateOf<TransportKind?>(null) }
     var lastResumeTick by remember { mutableStateOf(0) }
@@ -258,7 +430,56 @@ internal fun LiveView(
     }
 
     LaunchedEffect(player) {
-        player.state.collectLatest { playbackStatus = it }
+        player.state.collectLatest { status ->
+            playbackStatus = status
+            when (status) {
+                is PlaybackStatus.Playing -> {
+                    playingSince = SystemClock.elapsedRealtime()
+                    recoveryExhausted = false
+                    // A startup completing MUST clear the loading marker: the
+                    // periodic stuck-buffering guard would otherwise treat the
+                    // (long) startup loading as a rebuffer and fail the trial.
+                    val transition = transitionOnPlaying(
+                        startupInProgress = startupInProgress,
+                        loadingStartedAtMs = loadingStartedAtMs,
+                        nowMs = SystemClock.elapsedRealtime(),
+                    )
+                    if (transition.clearLoading) loadingStartedAtMs = -1
+                    if (transition.startupCompleted) {
+                        startupInProgress = false
+                        if (qualityActive) policy.onStartupComplete()
+                    } else {
+                        val rebufferMs = transition.rebufferDurationMs
+                        if (rebufferMs != null && qualityActive) {
+                            handleQualityAction(policy.onBufferingEnded(rebufferMs))
+                        }
+                    }
+                }
+                is PlaybackStatus.Loading -> {
+                    if (loadingStartedAtMs < 0) loadingStartedAtMs = SystemClock.elapsedRealtime()
+                }
+                is PlaybackStatus.Error -> {
+                    if (qualityActive) handleQualityAction(policy.onPlayerError())
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    // 1 Hz quality loop: buffer samples, stuck-buffering detection and the
+    // policy's periodic checks (health window, trial window).
+    LaunchedEffect(transport, qualityMode, player) {
+        while (true) {
+            delay(QUALITY_TICK_MS)
+            if (!qualityActive) continue
+            handleQualityAction(policy.onBufferSample(player.player.totalBufferedDuration))
+            if (loadingStartedAtMs >= 0 &&
+                SystemClock.elapsedRealtime() - loadingStartedAtMs >= LiveQualityPolicy.BUFFERING_DOWNGRADE_MS
+            ) {
+                handleQualityAction(policy.onBufferingTooLong())
+            }
+            handleQualityAction(policy.tick())
+        }
     }
 
     LaunchedEffect(playbackStatus, streamUrl, transport) {
@@ -512,6 +733,9 @@ private const val STREAMS_TIMEOUT_MS = 10_000L
 private const val MAX_AUTO_RECOVERY = 2
 private const val STABLE_PLAY_MS = 10_000L
 private const val DISCOVERY_RETRY_DELAY_MS = 1_500L
+
+/** 1 Hz cadence of the AUTO quality loop (buffer samples + policy ticks). */
+private const val QUALITY_TICK_MS = 1_000L
 
 /**
  * Conservative live-edge margin applied ONLY on the remote (Tailscale) path:

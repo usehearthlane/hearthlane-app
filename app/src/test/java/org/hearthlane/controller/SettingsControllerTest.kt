@@ -1,6 +1,7 @@
 package org.hearthlane.controller
 
 import org.hearthlane.core.frigate.FrigateConnection
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.hearthlane.core.frigate.TransportKind
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,20 +25,24 @@ class SettingsControllerTest {
         connecting: MutableStateFlow<Boolean> = MutableStateFlow(false),
         autoPlayEventClips: MutableStateFlow<Boolean> = MutableStateFlow(true),
         locationSharingEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false),
+        liveQualityMode: MutableStateFlow<LiveQualityMode> = MutableStateFlow(LiveQualityMode.AUTO),
         reset: () -> Unit = {},
         setAutoPlay: suspend (Boolean) -> Unit = {},
         setLocationSharing: suspend (Boolean) -> Unit = {},
+        setLiveQuality: suspend (LiveQualityMode) -> Unit = {},
     ) = SettingsController(
         baseDomain = baseDomain,
         connection = connection,
         connecting = connecting,
         autoPlayEventClips = autoPlayEventClips,
         locationSharingEnabled = locationSharingEnabled,
+        liveQualityMode = liveQualityMode,
         appVersion = "1.2.0",
         appBuild = "3",
         resetRemoteAccessAction = reset,
         setAutoPlayEventClipsAction = setAutoPlay,
         setLocationSharingEnabledAction = setLocationSharing,
+        setLiveQualityModeAction = setLiveQuality,
         scope = backgroundScope,
     )
 
@@ -203,6 +208,32 @@ class SettingsControllerTest {
         controller.resetRemoteAccess()
 
         assertEquals(2, resetCalls)
+    }
+
+    @Test
+    fun `live quality mode delegates and persists`() = runTest {
+        val persisted = mutableListOf<LiveQualityMode>()
+        val controller = controller(
+            setLiveQuality = { persisted.add(it) },
+        )
+
+        controller.setLiveQualityMode(LiveQualityMode.HIGH)
+        controller.setLiveQualityMode(LiveQualityMode.ECONOMY)
+        runCurrent()
+
+        assertEquals(listOf(LiveQualityMode.HIGH, LiveQualityMode.ECONOMY), persisted)
+    }
+
+    @Test
+    fun `live quality mode propagates when the persisted flow changes`() = runTest {
+        val mode = MutableStateFlow(LiveQualityMode.AUTO)
+        val controller = controller(liveQualityMode = mode)
+        runCurrent()
+
+        mode.value = LiveQualityMode.HIGH
+        runCurrent()
+
+        assertEquals(LiveQualityMode.HIGH, controller.state.value.liveQualityMode)
     }
 
     @Test

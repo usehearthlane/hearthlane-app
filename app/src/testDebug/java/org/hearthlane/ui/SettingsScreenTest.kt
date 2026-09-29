@@ -1,5 +1,8 @@
 package org.hearthlane.ui
 
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
@@ -11,6 +14,7 @@ import androidx.compose.ui.test.performScrollTo
 import org.hearthlane.controller.LocationSharingController
 import org.hearthlane.controller.SettingsController
 import org.hearthlane.core.frigate.FrigateConnection
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.hearthlane.core.frigate.TransportKind
 import org.hearthlane.location.LocationPermissionSnapshot
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -46,20 +50,24 @@ class SettingsScreenTest {
         connecting: Boolean = false,
         autoPlayEventClips: Boolean = true,
         locationSharingEnabled: Boolean = false,
+        liveQualityMode: LiveQualityMode = LiveQualityMode.AUTO,
         reset: () -> Unit = {},
         setAutoPlay: suspend (Boolean) -> Unit = {},
         setLocationSharing: suspend (Boolean) -> Unit = {},
+        setLiveQuality: suspend (LiveQualityMode) -> Unit = {},
     ) = SettingsController(
         baseDomain = MutableStateFlow(baseDomain),
         connection = MutableStateFlow(connection),
         connecting = MutableStateFlow(connecting),
         autoPlayEventClips = MutableStateFlow(autoPlayEventClips),
         locationSharingEnabled = MutableStateFlow(locationSharingEnabled),
+        liveQualityMode = MutableStateFlow(liveQualityMode),
         appVersion = "1.2.0",
         appBuild = "3",
         resetRemoteAccessAction = reset,
         setAutoPlayEventClipsAction = setAutoPlay,
         setLocationSharingEnabledAction = setLocationSharing,
+        setLiveQualityModeAction = setLiveQuality,
         scope = backgroundScope,
     )
 
@@ -156,6 +164,38 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun `live quality row shows the current mode and opens the dialog`() = runTest {
+        val persisted = mutableListOf<LiveQualityMode>()
+        val controller = controller(
+            liveQualityMode = LiveQualityMode.HIGH,
+            setLiveQuality = { persisted.add(it) },
+        )
+        render(controller)
+
+        composeTestRule.onNodeWithText("Live quality").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("High").performScrollTo().assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("Live quality").performClick()
+        composeTestRule.onNodeWithTag("live_quality_auto").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("live_quality_economy").performClick()
+        composeTestRule.waitForIdle()
+        runCurrent()
+
+        assertEquals(listOf(LiveQualityMode.ECONOMY), persisted)
+    }
+
+    @Test
+    fun `live quality dialog reflects the persisted mode`() = runTest {
+        val controller = controller(liveQualityMode = LiveQualityMode.ECONOMY)
+        render(controller)
+
+        composeTestRule.onNodeWithText("Live quality").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("live_quality_economy")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+    }
+
+    @Test
     fun `shows the server address and the connection summary`() = runTest {
         val controller = controller(baseDomain = "hearthlane.example")
         render(controller)
@@ -204,11 +244,13 @@ class SettingsScreenTest {
             connecting = connecting,
             autoPlayEventClips = MutableStateFlow(true),
             locationSharingEnabled = MutableStateFlow(false),
+            liveQualityMode = MutableStateFlow(LiveQualityMode.AUTO),
             appVersion = "1.2.0",
             appBuild = "3",
             resetRemoteAccessAction = {},
             setAutoPlayEventClipsAction = {},
             setLocationSharingEnabledAction = {},
+            setLiveQualityModeAction = {},
             scope = backgroundScope,
         )
         render(controller)

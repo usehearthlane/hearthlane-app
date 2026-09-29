@@ -46,9 +46,21 @@ class LiveStreamPlayer(
     private val onSessionDead: () -> Unit = {},
     private val liveTargetOffsetMs: Long? = null,
     private val diagTransport: String = "UNKNOWN",
+    /** Quality-policy feeds: a media segment finished downloading (bytes, download ms). */
+    private val onMediaSegmentLoaded: (Long, Long) -> Unit = { _, _ -> },
+    /** Quality-policy feed: a media playlist poll arrived (gap since the previous poll, ms). */
+    private val onPlaylistPolled: (Long) -> Unit = {},
+    /** Quality-policy feed: a transport read stall occurred. */
+    private val onReadStall: () -> Unit = {},
+    /** Quality-policy feed: a non-dead load error occurred. */
+    private val onLoadError: (Int) -> Unit = {},
 ) {
 
     private val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
+
+    /** True while the early session recovery is in flight: quality switches
+     *  must not compete with it (the recovery re-resolves the current level). */
+    val isRecoveryInFlight: Boolean get() = recoveryPolicy.recoveryInFlight
 
     @UnstableApi
     val player: ExoPlayer = ExoPlayer.Builder(context)
@@ -187,6 +199,7 @@ class LiveStreamPlayer(
                 val now = SystemClock.elapsedRealtime()
                 val delta = if (lastPlaylistPollStartMs >= 0) now - lastPlaylistPollStartMs else -1L
                 lastPlaylistPollStartMs = now
+                onPlaylistPolled(delta)
                 // Only anomalies are surfaced: a delayed poll is the first sign
                 // of a dead media playlist and precedes a session death.
                 if (delta > PLAYLIST_POLL_GAP_THRESHOLD_MS) {
@@ -213,6 +226,9 @@ class LiveStreamPlayer(
                 return
             }
             val resource = classifyResource(loadEventInfo.dataSpec.uri.toString())
+            if (resource == "MEDIA_SEGMENT") {
+                onMediaSegmentLoaded(loadEventInfo.bytesLoaded, loadEventInfo.loadDurationMs)
+            }
             if (resource == "MEDIA_PLAYLIST") {
                 if (recoveryPolicy.recoveryInFlight) {
                     val elapsed = recoveryPolicy.onRecoveryConfirmed()
@@ -261,6 +277,8 @@ class LiveStreamPlayer(
                         "epoch=${recoveryPolicy.sessionEpoch}",
                 )
                 maybeRunEarlyRecovery()
+            } else {
+                onLoadError(status)
             }
             VideoDiag.player(
                 "LIVE",
@@ -299,6 +317,7 @@ class LiveStreamPlayer(
                 getter,
                 connectTimeoutMs,
                 this::onBytesTransferred,
+                onReadStall,
                 "LIVE",
                 bandwidthMeter,
             ),

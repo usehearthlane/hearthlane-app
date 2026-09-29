@@ -23,6 +23,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -52,6 +53,7 @@ import org.hearthlane.controller.LocationSharingController
 import org.hearthlane.controller.LocationSharingStatus
 import org.hearthlane.controller.LocationSharingStep
 import org.hearthlane.controller.SettingsController
+import org.hearthlane.core.frigate.LiveQualityMode
 
 /** Compose test tag anchoring the auto-play switch for UI tests. */
 internal const val AUTOPLAY_TOGGLE_TAG = "autoplay_toggle"
@@ -82,6 +84,7 @@ fun SettingsScreen(
 ) {
     val state by controller.state.collectAsState()
     var confirmReconfigure by remember { mutableStateOf(false) }
+    var showLiveQualityDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -138,6 +141,11 @@ fun SettingsScreen(
                 onCheckedChange = controller::setAutoPlayEventClips,
                 testTag = AUTOPLAY_TOGGLE_TAG,
             )
+            SettingsRow(
+                title = stringResource(R.string.settings_live_quality),
+                value = stringResource(liveQualityLabel(state.liveQualityMode)),
+                onClick = { showLiveQualityDialog = true },
+            )
 
             SettingsDivider()
 
@@ -176,6 +184,14 @@ fun SettingsScreen(
         }
     }
 
+    if (showLiveQualityDialog) {
+        LiveQualityDialog(
+            selected = state.liveQualityMode,
+            onSelect = controller::setLiveQualityMode,
+            onDismiss = { showLiveQualityDialog = false },
+        )
+    }
+
     if (confirmReconfigure) {
         AlertDialog(
             onDismissRequest = { confirmReconfigure = false },
@@ -195,6 +211,87 @@ fun SettingsScreen(
                 }
             },
         )
+    }
+}
+
+/** Label string for a live quality mode. */
+@Composable
+private fun liveQualityLabel(mode: LiveQualityMode): Int = when (mode) {
+    LiveQualityMode.AUTO -> R.string.settings_live_quality_auto
+    LiveQualityMode.HIGH -> R.string.settings_live_quality_high
+    LiveQualityMode.ECONOMY -> R.string.settings_live_quality_economy
+}
+
+@Composable
+private fun LiveQualityDialog(
+    selected: LiveQualityMode,
+    onSelect: (LiveQualityMode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_live_quality)) },
+        text = {
+            Column {
+                LiveQualityOption(
+                    mode = LiveQualityMode.AUTO,
+                    label = R.string.settings_live_quality_auto,
+                    description = R.string.settings_live_quality_auto_desc,
+                    selected = selected == LiveQualityMode.AUTO,
+                    onSelect = { onSelect(LiveQualityMode.AUTO) },
+                )
+                LiveQualityOption(
+                    mode = LiveQualityMode.HIGH,
+                    label = R.string.settings_live_quality_high,
+                    description = R.string.settings_live_quality_high_desc,
+                    selected = selected == LiveQualityMode.HIGH,
+                    onSelect = { onSelect(LiveQualityMode.HIGH) },
+                )
+                LiveQualityOption(
+                    mode = LiveQualityMode.ECONOMY,
+                    label = R.string.settings_live_quality_economy,
+                    description = R.string.settings_live_quality_economy_desc,
+                    selected = selected == LiveQualityMode.ECONOMY,
+                    onSelect = { onSelect(LiveQualityMode.ECONOMY) },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel_button))
+            }
+        },
+    )
+}
+
+@Composable
+private fun LiveQualityOption(
+    mode: LiveQualityMode,
+    label: Int,
+    description: Int,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onSelect,
+            modifier = Modifier.testTag("live_quality_${mode.name.lowercase()}"),
+        )
+        Column {
+            Text(text = stringResource(label), style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = stringResource(description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

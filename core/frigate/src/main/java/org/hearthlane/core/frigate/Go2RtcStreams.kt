@@ -193,6 +193,74 @@ class Go2RtcStreams(private val getter: HttpBytesGetter) {
 enum class LiveStreamPreference { MAIN, REMOTE_SUB }
 
 /**
+ * User-facing live quality mode.
+ *
+ * AUTO adapts the live stream to the observed playback conditions (remote
+ * path only), HIGH always uses the camera's main stream, ECONOMY prefers the
+ * camera's substream when one exists. This enum is the persisted setting
+ * surface; the concrete stream decision lives in [initialQualityLevel] and
+ * [streamNameForQualityLevel].
+ */
+enum class LiveQualityMode { AUTO, HIGH, ECONOMY }
+
+/**
+ * Quality level resolved from a [LiveQualityMode]: the camera's main stream
+ * (MAIN) or its substream (SUB). Levels abstract the stream-name convention
+ * so the AUTO policy can reason about quality without knowing camera names.
+ */
+enum class LiveQualityLevel { MAIN, SUB }
+
+/**
+ * The level a mode starts on for a transport ([remote] = the Tailscale path).
+ * AUTO starts conservatively on the substream remotely and on the main
+ * stream locally; no adaptation is introduced for the local path.
+ */
+fun initialQualityLevel(mode: LiveQualityMode, remote: Boolean): LiveQualityLevel =
+    when (mode) {
+        LiveQualityMode.HIGH -> LiveQualityLevel.MAIN
+        LiveQualityMode.ECONOMY -> LiveQualityLevel.SUB
+        LiveQualityMode.AUTO -> if (remote) LiveQualityLevel.SUB else LiveQualityLevel.MAIN
+    }
+
+/**
+ * The main and substream names of a camera by exact match, or null when the
+ * camera itself has no playable stream. The substream is null when
+ * `<cameraId>_sub` is absent from [availableStreams].
+ */
+data class CameraStreams(val main: String, val sub: String?)
+
+fun cameraStreamSelection(
+    cameraId: String,
+    availableStreams: Set<String>,
+): CameraStreams? {
+    if (cameraId !in availableStreams) return null
+    val sub = "${cameraId}_sub"
+    return CameraStreams(cameraId, sub.takeIf { it in availableStreams })
+}
+
+/**
+ * The stream name for [level] by exact match: MAIN is the camera's own name,
+ * SUB is `<cameraId>_sub` with a fallback to the main stream when the
+ * substream does not exist. Returns null when the camera has no playable
+ * stream. Selection is always by exact name equality — never by
+ * substring/prefix or stream order.
+ */
+fun streamNameForQualityLevel(
+    cameraId: String,
+    availableStreams: Set<String>,
+    level: LiveQualityLevel,
+): String? {
+    if (cameraId !in availableStreams) return null
+    return when (level) {
+        LiveQualityLevel.MAIN -> cameraId
+        LiveQualityLevel.SUB -> {
+            val sub = "${cameraId}_sub"
+            if (sub in availableStreams) sub else cameraId
+        }
+    }
+}
+
+/**
  * Pure stream-selection policy for the live view.
  *
  * - [LiveStreamPreference.MAIN]: the camera's own stream name (exact match).

@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.hearthlane.core.frigate.LiveQualityMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -537,9 +538,42 @@ class AppSettingsTest {
         assertEquals("the nickname must not touch other preferences", "hearthlane.example", reloaded.baseDomain.value)
     }
 
+@Test
+    fun `live quality mode defaults to AUTO`() = runTest {
+        val store = dataStore(backgroundScope)
+        val settings = AppSettings.createForTest(store, "hearthlane.example", backgroundScope)
+        settings.ready.first { it }
+
+        assertEquals(LiveQualityMode.AUTO, settings.liveQualityMode.value)
+    }
+
+    @Test
+    fun `persists an edited live quality mode across instances`() = runTest {
+        val store = dataStore(backgroundScope)
+        val settings = AppSettings.createForTest(store, "hearthlane.example", backgroundScope)
+        settings.ready.first { it }
+
+        settings.setLiveQualityMode(LiveQualityMode.ECONOMY)
+
+        val reloaded = AppSettings.createForTest(store, "hearthlane.example", backgroundScope)
+        reloaded.ready.first { it }
+        assertEquals(LiveQualityMode.ECONOMY, reloaded.liveQualityMode.value)
+    }
+
+    @Test
+    fun `an unknown persisted live quality mode falls back to AUTO`() = runTest {
+        val store = dataStore(backgroundScope)
+        store.edit { it[stringPreferencesKey("live_quality_mode")] = "BOGUS" }
+        val settings = AppSettings.createForTest(store, "hearthlane.example", backgroundScope)
+        settings.ready.first { it }
+
+        assertEquals(LiveQualityMode.AUTO, settings.liveQualityMode.value)
+    }
+
     companion object {
         private val BASE_DOMAIN = stringPreferencesKey("hearthlane_base_domain")
         private val LEGACY_FRIGATE_URL = stringPreferencesKey("frigate_base_url")
+        private val LEGACY_RELAY_URL = stringPreferencesKey("relay_base_url")
         private val LEGACY_RELAY_TOKEN = stringPreferencesKey("relay_token")
         private val LOCATION_SHARING = booleanPreferencesKey("location_sharing_enabled")
         private val SETUP_COMPLETE = booleanPreferencesKey("setup_complete")

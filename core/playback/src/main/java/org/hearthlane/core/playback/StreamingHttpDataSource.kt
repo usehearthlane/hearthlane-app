@@ -41,6 +41,7 @@ class StreamingHttpDataSource(
     private val getter: HttpStreamGetter,
     private val connectTimeoutMs: Long,
     private val onBytes: (Long) -> Unit = {},
+    private val onReadStall: () -> Unit = {},
     private val diagLabel: String = "EVENT",
 ) : DataSource {
 
@@ -169,6 +170,7 @@ class StreamingHttpDataSource(
                     bytesRead,
                     bytesRead,
                 )
+                onReadStall()
             }
         }
         val n = opened.read(buffer, offset, toRead)
