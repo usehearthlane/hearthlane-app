@@ -28,6 +28,7 @@ object LocationEventLog {
     const val EVENT_PUBLISH_START = "publish-start"
     const val EVENT_PUBLISH_SUCCESS = "publish-success"
     const val EVENT_PUBLISH_FAILURE = "publish-failure"
+    const val EVENT_BACKOFF = "backoff"
 
     /** Emits [event] through logcat with the shared tag. */
     fun emit(event: LocationEvent) {

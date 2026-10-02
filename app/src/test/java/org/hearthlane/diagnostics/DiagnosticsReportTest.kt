@@ -93,7 +93,7 @@ class DiagnosticsReportTest {
             locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
-            maxPublishIntervalLabel = "5 min",
+            presenceIntervalLabel = "15 min",
             mapActiveIntervalLabel = "30 sec",
             lastRead = "16:57:12",
             lastReadResult = "Success",
@@ -118,7 +118,7 @@ class DiagnosticsReportTest {
         assertTrue(report.contains("Location check interval: 1 min"))
         assertTrue(report.contains("Minimum publish interval: 30 sec"))
         assertTrue(report.contains("Movement threshold: 100 m"))
-        assertTrue(report.contains("Maximum publish interval: 5 min"))
+        assertTrue(report.contains("Presence interval: 15 min"))
         assertTrue(report.contains("Map-active interval: 30 sec"))
         assertTrue(report.contains("Last location read: 16:57:12 (Success)"))
         assertTrue(report.contains("Last publish attempt: 16:57:13"))
@@ -143,7 +143,7 @@ class DiagnosticsReportTest {
             locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
-            maxPublishIntervalLabel = "5 min",
+            presenceIntervalLabel = "15 min",
             mapActiveIntervalLabel = "30 sec",
             lastRead = null,
             lastReadResult = null,
@@ -176,7 +176,7 @@ class DiagnosticsReportTest {
             locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
-            maxPublishIntervalLabel = "5 min",
+            presenceIntervalLabel = "15 min",
             mapActiveIntervalLabel = "30 sec",
             lastRead = "16:57:12",
             lastReadResult = "Success",
@@ -210,7 +210,7 @@ class DiagnosticsReportTest {
             locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
-            maxPublishIntervalLabel = "5 min",
+            presenceIntervalLabel = "15 min",
             mapActiveIntervalLabel = "30 sec",
             lastRead = "16:57:12",
             lastReadResult = "Success",
@@ -255,6 +255,47 @@ class DiagnosticsReportTest {
     }
 
     @Test
+    fun `location report renders v2 machine fields`() {
+        val location = LocationDiagnosticsSnapshot(
+            sharingEnabled = "Yes",
+            foregroundPermission = "Granted",
+            backgroundPermission = "Granted",
+            locationServices = "Enabled",
+            foregroundService = "Running",
+            publisherState = "Waiting",
+            publisherMode = "Background",
+            locationCheckIntervalLabel = "1 min",
+            minPublishIntervalLabel = "30 sec",
+            movementThresholdLabel = "100 m",
+            presenceIntervalLabel = "15 min",
+            mapActiveIntervalLabel = "30 sec",
+            lastRead = "16:57:12",
+            lastReadResult = "Success",
+            lastPublishAttempt = "16:57:13",
+            lastPublishResult = "Success",
+            lastSuccessfulPublish = "16:57:13",
+            pendingLocation = "Yes",
+            relay = "Reachable",
+            deviceId = "hearthlane-ab12cd34",
+            deviceNickname = "Meu celular",
+            lastFixDecision = "ACCEPTED_MOVEMENT",
+            lastPublishDecision = "PUBLISH MOVEMENT",
+            backoff = "active attempt 2, 90 sec remaining",
+            presenceCount = 3,
+            lastPresenceAt = "1h02m03s",
+            lastPresenceDecision = "PRESENCE",
+        )
+        val report = DiagnosticsReport.build(snapshot.copy(location = location))
+
+        assertTrue(report.contains("Last fix decision: ACCEPTED_MOVEMENT"))
+        assertTrue(report.contains("Last publish decision: PUBLISH MOVEMENT"))
+        assertTrue(report.contains("Backoff: active attempt 2, 90 sec remaining"))
+        assertTrue(report.contains("Presence count: 3"))
+        assertTrue(report.contains("Last presence at: 1h02m03s (elapsed)"))
+        assertTrue(report.contains("Last presence decision: PRESENCE"))
+    }
+
+    @Test
     fun `location report renders n a for missing observability fields`() {
         val location = LocationDiagnosticsSnapshot(
             sharingEnabled = "Yes",
@@ -267,7 +308,7 @@ class DiagnosticsReportTest {
             locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
-            maxPublishIntervalLabel = "5 min",
+            presenceIntervalLabel = "15 min",
             mapActiveIntervalLabel = "30 sec",
             lastRead = null,
             lastReadResult = null,
@@ -284,7 +325,12 @@ class DiagnosticsReportTest {
         assertTrue(report.contains("Last fix provider: n/a"))
         assertTrue(report.contains("Last fix accuracy: n/a"))
         assertTrue(report.contains("Last fix age: n/a"))
+        assertTrue(report.contains("Last fix decision: n/a"))
         assertTrue(report.contains("Last publish decision: n/a"))
+        assertTrue(report.contains("Backoff: none"))
+        assertTrue(report.contains("Presence count: 0"))
+        assertTrue(report.contains("Last presence at: Never"))
+        assertTrue(report.contains("Last presence decision: n/a"))
         assertTrue(report.contains("Location tsnet last start at: Never"))
         assertTrue(report.contains("Location tsnet last stop at: Never"))
     }

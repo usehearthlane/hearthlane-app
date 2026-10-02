@@ -132,12 +132,15 @@ class LocationForegroundServiceTest {
     }
 
     @Test
-    fun `interval constants keep the check cadence and the adaptive publish policy`() {
+    fun `acquisition and v2 policy constants keep the expected cadences`() {
         assertEquals(60_000L, LocationForegroundService.BACKGROUND_INTERVAL_MS)
         assertEquals(30_000L, LocationForegroundService.ACTIVE_INTERVAL_MS)
-        assertEquals(30_000L, LocationForegroundService.MIN_PUBLISH_INTERVAL_MS)
-        assertEquals(5 * 60_000L, LocationForegroundService.MAX_PUBLISH_INTERVAL_MS)
-        assertEquals(100.0, LocationForegroundService.DISTANCE_THRESHOLD_METERS, 0.0)
+        assertEquals(30_000L, LocationPolicy.MIN_PUBLISH_INTERVAL_MS)
+        assertEquals(3 * 60_000L, LocationPolicy.MAX_FIX_AGE_FOR_PUBLISH_MS)
+        assertEquals(100.0, LocationPolicy.DISTANCE_THRESHOLD_METERS, 0.0)
+        assertEquals(50.0, LocationPolicy.MAP_ACTIVE_DISTANCE_THRESHOLD_METERS, 0.0)
+        assertEquals(15 * 60_000L, LocationPolicy.PRESENCE_INTERVAL_MS)
+        assertEquals(60_000L, LocationPolicy.BACKOFF_FLOOR_MS)
     }
 
     @Test

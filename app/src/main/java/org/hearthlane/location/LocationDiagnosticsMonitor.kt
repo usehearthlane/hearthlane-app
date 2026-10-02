@@ -38,6 +38,13 @@ object LocationDiagnosticsMonitor {
         val lastFixAccuracyMeters: Float? = null,
         val lastFixAgeMs: Long? = null,
         val lastPublishDecision: String? = null,
+        val lastFixDecision: String? = null,
+        val backoffActive: Boolean = false,
+        val backoffAttempt: Int = 0,
+        val backoffRemainingMs: Long? = null,
+        val presenceCount: Int = 0,
+        val lastPresenceAtMs: Long? = null,
+        val lastPresenceDecision: String? = null,
     )
 
     private val _state = MutableStateFlow(PublishingState())
@@ -68,7 +75,14 @@ object LocationDiagnosticsMonitor {
                 lastFixProvider = publisher.lastFixProvider,
                 lastFixAccuracyMeters = publisher.lastFixAccuracyMeters,
                 lastFixAgeMs = publisher.lastFixAgeMs,
-                lastPublishDecision = publisher.lastPublishDecision?.name,
+                lastPublishDecision = publisher.lastPublishDecision,
+                lastFixDecision = publisher.lastFixDecision,
+                backoffActive = publisher.backoffActive,
+                backoffAttempt = publisher.backoffAttempt,
+                backoffRemainingMs = publisher.backoffRemainingMs,
+                presenceCount = publisher.presenceCount,
+                lastPresenceAtMs = publisher.lastPresenceAtMs,
+                lastPresenceDecision = publisher.lastPresenceDecision,
             )
         }
     }

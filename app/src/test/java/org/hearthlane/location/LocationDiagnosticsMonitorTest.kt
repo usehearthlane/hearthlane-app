@@ -51,7 +51,14 @@ class LocationDiagnosticsMonitorTest {
             lastFixProvider = "network",
             lastFixAccuracyMeters = 20f,
             lastFixAgeMs = 1_500L,
-            lastPublishDecision = PublishDecisionReason.MOVEMENT,
+            lastPublishDecision = PublishDecisionReason.MOVEMENT.name,
+            lastFixDecision = FixDecisionReason.ACCEPTED_MOVEMENT.name,
+            backoffActive = true,
+            backoffAttempt = 2,
+            backoffRemainingMs = 90_000L,
+            presenceCount = 1,
+            lastPresenceAtMs = 500_000L,
+            lastPresenceDecision = PublishDecisionReason.PRESENCE.name,
         )
 
         LocationDiagnosticsMonitor.onPublisherState(publisherState)
@@ -67,6 +74,13 @@ class LocationDiagnosticsMonitorTest {
         assertEquals(20f, state.lastFixAccuracyMeters)
         assertEquals(1_500L, state.lastFixAgeMs)
         assertEquals(PublishDecisionReason.MOVEMENT.name, state.lastPublishDecision)
+        assertEquals(FixDecisionReason.ACCEPTED_MOVEMENT.name, state.lastFixDecision)
+        assertTrue(state.backoffActive)
+        assertEquals(2, state.backoffAttempt)
+        assertEquals(90_000L, state.backoffRemainingMs)
+        assertEquals(1, state.presenceCount)
+        assertEquals(500_000L, state.lastPresenceAtMs)
+        assertEquals(PublishDecisionReason.PRESENCE.name, state.lastPresenceDecision)
     }
 
     @Test

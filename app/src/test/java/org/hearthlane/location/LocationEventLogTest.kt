@@ -30,12 +30,12 @@ class LocationEventLogTest {
                 LocationEventLog.EVENT_PUBLISH_DECISION,
                 listOf(
                     "decision" to "SKIP",
-                    "reason" to PublishDecisionReason.NO_FIX.name,
+                    "reason" to PublishDecisionReason.NO_PENDING.name,
                     "distanceMeters" to null,
                 ),
             ),
         )
-        assertEquals("event=publish-decision decision=SKIP reason=NO_FIX", text)
+        assertEquals("event=publish-decision decision=SKIP reason=NO_PENDING", text)
     }
 
     @Test
@@ -99,8 +99,9 @@ class LocationEventLogTest {
             LocationEventLog.EVENT_PUBLISH_START,
             LocationEventLog.EVENT_PUBLISH_SUCCESS,
             LocationEventLog.EVENT_PUBLISH_FAILURE,
+            LocationEventLog.EVENT_BACKOFF,
         )
-        assertTrue(names.all { it.startsWith("location-") || it.startsWith("pending-") || it.startsWith("publish-") })
+        assertTrue(names.all { it.startsWith("location-") || it.startsWith("pending-") || it.startsWith("publish-") || it == "backoff" })
 
         val sample = LocationEventLog.format(
             LocationEvent(

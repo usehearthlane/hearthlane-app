@@ -2,6 +2,7 @@ package org.hearthlane.diagnostics
 
 import org.hearthlane.core.relay.RelayConnection
 import org.hearthlane.core.relay.RelayTransportKind
+import org.hearthlane.location.FixDecisionReason
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationPermissionSnapshot
 import org.hearthlane.location.LocationReadStatus
@@ -40,6 +41,13 @@ class LocationDiagnosticsTest {
         lastFixAccuracyMeters: Float? = null,
         lastFixAgeMs: Long? = null,
         lastPublishDecision: String? = null,
+        lastFixDecision: String? = null,
+        backoffActive: Boolean = false,
+        backoffAttempt: Int = 0,
+        backoffRemainingMs: Long? = null,
+        presenceCount: Int = 0,
+        lastPresenceAtMs: Long? = null,
+        lastPresenceDecision: String? = null,
         tsnet: TsnetLifecycleMonitor.State = TsnetLifecycleMonitor.State(),
         relay: RelayConnection? = RelayConnection.Connected(RelayTransportKind.LOCAL),
         deviceId: String = "hearthlane-ab12cd34",
@@ -62,6 +70,13 @@ class LocationDiagnosticsTest {
             lastFixAccuracyMeters = lastFixAccuracyMeters,
             lastFixAgeMs = lastFixAgeMs,
             lastPublishDecision = lastPublishDecision,
+            lastFixDecision = lastFixDecision,
+            backoffActive = backoffActive,
+            backoffAttempt = backoffAttempt,
+            backoffRemainingMs = backoffRemainingMs,
+            presenceCount = presenceCount,
+            lastPresenceAtMs = lastPresenceAtMs,
+            lastPresenceDecision = lastPresenceDecision,
         ),
         relay = relay,
         deviceId = deviceId,
@@ -70,7 +85,7 @@ class LocationDiagnosticsTest {
         locationCheckIntervalMs = 60_000L,
         minPublishIntervalMs = 30_000L,
         distanceThresholdMeters = 100.0,
-        maxPublishIntervalMs = 5 * 60_000L,
+        presenceIntervalMs = 15 * 60_000L,
         mapActiveIntervalMs = 30_000L,
     )
 
@@ -158,7 +173,7 @@ class LocationDiagnosticsTest {
         assertEquals("1 min", result.locationCheckIntervalLabel)
         assertEquals("30 sec", result.minPublishIntervalLabel)
         assertEquals("100 m", result.movementThresholdLabel)
-        assertEquals("5 min", result.maxPublishIntervalLabel)
+        assertEquals("15 min", result.presenceIntervalLabel)
         assertEquals("30 sec", result.mapActiveIntervalLabel)
     }
 
@@ -280,8 +295,8 @@ class LocationDiagnosticsTest {
             snapshot(lastPublishDecision = PublishDecisionReason.MIN_INTERVAL.name).lastPublishDecision,
         )
         assertEquals(
-            "SKIP NO_FIX",
-            snapshot(lastPublishDecision = PublishDecisionReason.NO_FIX.name).lastPublishDecision,
+            "SKIP NO_PENDING",
+            snapshot(lastPublishDecision = PublishDecisionReason.NO_PENDING.name).lastPublishDecision,
         )
     }
 
@@ -303,6 +318,34 @@ class LocationDiagnosticsTest {
     fun `non usable accuracy is reported as n a`() {
         assertEquals("n/a", snapshot(lastFixAccuracyMeters = Float.NaN).lastFixAccuracy)
         assertEquals("n/a", snapshot(lastFixAccuracyMeters = -1f).lastFixAccuracy)
+    }
+
+    @Test
+    fun `v2 decision and backoff state are reported`() {
+        val result = snapshot(
+            lastFixDecision = FixDecisionReason.ACCEPTED_MOVEMENT.name,
+            lastPublishDecision = PublishDecisionReason.MOVEMENT.name,
+            backoffActive = true,
+            backoffAttempt = 2,
+            backoffRemainingMs = 90_000L,
+            presenceCount = 1,
+            lastPresenceAtMs = 3_723_000L,
+            lastPresenceDecision = PublishDecisionReason.PRESENCE.name,
+        )
+
+        assertEquals(FixDecisionReason.ACCEPTED_MOVEMENT.name, result.lastFixDecision)
+        assertEquals("PUBLISH MOVEMENT", result.lastPublishDecision)
+        assertEquals("active attempt 2, 90 sec remaining", result.backoff)
+        assertEquals(1, result.presenceCount)
+        assertEquals("1h02m03s", result.lastPresenceAt)
+        assertEquals(PublishDecisionReason.PRESENCE.name, result.lastPresenceDecision)
+    }
+
+    @Test
+    fun `backoff reports none when inactive`() {
+        assertEquals("none", snapshot().backoff)
+        assertNull(snapshot().lastFixDecision)
+        assertNull(snapshot().lastPresenceAt)
     }
 
     @Test

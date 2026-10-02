@@ -87,7 +87,7 @@ class LocationForegroundService : Service() {
             }
             ACTION_PUBLISH_NOW -> {
                 ensurePublisher()
-                loopJob?.let { publisher?.let { p -> serviceScope.launch { p.publishLatest() } } }
+                loopJob?.let { publisher?.let { p -> p.publishNow() } }
             }
             else -> {
                 val requested = intent?.getLongExtra(EXTRA_INTERVAL_MS, 0L)?.takeIf { it > 0 }
@@ -167,6 +167,11 @@ class LocationForegroundService : Service() {
             checkIntervalMs = { intervalMs.get() },
             scope = serviceScope,
             onPublishFailure = session::invalidate,
+            mode = if (intervalMs.get() == ACTIVE_INTERVAL_MS) {
+                PublisherMode.MAP_ACTIVE
+            } else {
+                PublisherMode.BACKGROUND
+            },
         )
         publisher = p
         loopJob = serviceScope.launch { p.start() }
@@ -271,11 +276,11 @@ class LocationForegroundService : Service() {
         /** Location-read cadence while the map is open (map-active). */
         const val ACTIVE_INTERVAL_MS = 30_000L
 
-        /** Adaptive publish policy (see [BackgroundLocationPublisher]). */
-        const val MIN_PUBLISH_INTERVAL_MS = 30_000L
-        const val MAX_PUBLISH_INTERVAL_MS = 5 * 60_000L
-        const val DISTANCE_THRESHOLD_METERS = 100.0
+        /** Maximum time for a single one-shot location read. */
         const val LOCATION_TIMEOUT_MS = 10_000L
+
+        // The V2 adaptive publish policy (freshness, accuracy, movement,
+        // backoff, presence) lives in LocationPolicy; acquisition stays here.
 
         private const val CHANNEL_ID = "location"
         private const val NOTIFICATION_ID = 42

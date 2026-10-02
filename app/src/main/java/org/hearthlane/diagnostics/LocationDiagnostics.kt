@@ -4,6 +4,7 @@ import org.hearthlane.core.relay.RelayConnection
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationForegroundService
 import org.hearthlane.location.LocationPermissionSnapshot
+import org.hearthlane.location.LocationPolicy
 import org.hearthlane.location.LocationReadStatus
 import org.hearthlane.location.PublishDecisionReason
 import org.hearthlane.location.TsnetLifecycleMonitor
@@ -31,7 +32,7 @@ data class LocationDiagnosticsSnapshot(
     val locationCheckIntervalLabel: String,
     val minPublishIntervalLabel: String,
     val movementThresholdLabel: String,
-    val maxPublishIntervalLabel: String,
+    val presenceIntervalLabel: String,
     val mapActiveIntervalLabel: String,
     val lastRead: String?,
     val lastReadResult: String?,
@@ -46,6 +47,11 @@ data class LocationDiagnosticsSnapshot(
     val lastFixAccuracy: String? = null,
     val lastFixAge: String? = null,
     val lastPublishDecision: String? = null,
+    val lastFixDecision: String? = null,
+    val backoff: String = "none",
+    val presenceCount: Int = 0,
+    val lastPresenceAt: String? = null,
+    val lastPresenceDecision: String? = null,
     val tsnetState: String = "Stopped",
     val tsnetStarts: Int = 0,
     val tsnetStops: Int = 0,
@@ -76,9 +82,9 @@ fun buildLocationDiagnosticsSnapshot(
     deviceNickname: String,
     tsnet: TsnetLifecycleMonitor.State = TsnetLifecycleMonitor.state.value,
     locationCheckIntervalMs: Long = LocationForegroundService.BACKGROUND_INTERVAL_MS,
-    minPublishIntervalMs: Long = LocationForegroundService.MIN_PUBLISH_INTERVAL_MS,
-    distanceThresholdMeters: Double = LocationForegroundService.DISTANCE_THRESHOLD_METERS,
-    maxPublishIntervalMs: Long = LocationForegroundService.MAX_PUBLISH_INTERVAL_MS,
+    minPublishIntervalMs: Long = LocationPolicy.MIN_PUBLISH_INTERVAL_MS,
+    distanceThresholdMeters: Double = LocationPolicy.DISTANCE_THRESHOLD_METERS,
+    presenceIntervalMs: Long = LocationPolicy.PRESENCE_INTERVAL_MS,
     mapActiveIntervalMs: Long = LocationForegroundService.ACTIVE_INTERVAL_MS,
 ): LocationDiagnosticsSnapshot = LocationDiagnosticsSnapshot(
     sharingEnabled = yesNo(sharingEnabled),
@@ -95,7 +101,7 @@ fun buildLocationDiagnosticsSnapshot(
     locationCheckIntervalLabel = intervalLabel(locationCheckIntervalMs),
     minPublishIntervalLabel = intervalLabel(minPublishIntervalMs),
     movementThresholdLabel = "${distanceThresholdMeters.toInt()} m",
-    maxPublishIntervalLabel = intervalLabel(maxPublishIntervalMs),
+    presenceIntervalLabel = intervalLabel(presenceIntervalMs),
     mapActiveIntervalLabel = intervalLabel(mapActiveIntervalMs),
     lastRead = timeLabel(publishing.lastReadAtMs),
     lastReadResult = classifyReadResult(publishing.lastReadResult),
@@ -114,6 +120,11 @@ fun buildLocationDiagnosticsSnapshot(
     lastFixAccuracy = fixAccuracyLabel(publishing.lastFixAccuracyMeters),
     lastFixAge = publishing.lastFixAgeMs?.let(::intervalLabel),
     lastPublishDecision = publishDecisionLabel(publishing.lastPublishDecision),
+    lastFixDecision = publishing.lastFixDecision,
+    backoff = backoffLabel(publishing.backoffActive, publishing.backoffAttempt, publishing.backoffRemainingMs),
+    presenceCount = publishing.presenceCount,
+    lastPresenceAt = publishing.lastPresenceAtMs?.let(::formatUptime),
+    lastPresenceDecision = publishing.lastPresenceDecision,
     tsnetState = if (tsnet.currentRunning) "Running" else "Stopped",
     tsnetStarts = tsnet.startCount,
     tsnetStops = tsnet.stopCount,
@@ -200,6 +211,13 @@ fun fixAccuracyLabel(accuracyMeters: Float?): String? = when {
 fun publishDecisionLabel(reasonName: String?): String? = reasonName?.let {
     val reason = runCatching { PublishDecisionReason.valueOf(it) }.getOrNull()
     if (reason == null) it else "${if (reason.publishes) "PUBLISH" else "SKIP"} ${reason.name}"
+}
+
+/** Backoff state label: "none" or "active attempt N, X remaining". */
+private fun backoffLabel(active: Boolean, attempt: Int, remainingMs: Long?): String = when {
+    !active -> "none"
+    remainingMs == null -> "active (attempt $attempt)"
+    else -> "active attempt $attempt, ${intervalLabel(remainingMs)} remaining"
 }
 
 /** Duration label for a short measurement ("4.2 s"). */
