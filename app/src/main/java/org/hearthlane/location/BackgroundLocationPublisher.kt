@@ -34,6 +34,11 @@ import kotlin.math.max
  *
  * [stop] cancels the loop; no further publish is started.
  *
+ * Every pipeline event is emitted through [emitEvent] (default: structured
+ * logcat via [LocationEventLog]; injectable so tests capture events without
+ * Android). No coordinate ever reaches an event: only provider, accuracy, age,
+ * distances and decision reasons.
+ *
  * [distanceMeters] and [clockMs] are test seams (great-circle distance and the
  * wall clock used by the publish-policy timers).
  */
@@ -46,6 +51,7 @@ internal class BackgroundLocationPublisher(
     private val onPublishFailure: (() -> Unit)? = null,
     private val distanceMeters: (DeviceLocation, DeviceLocation) -> Double = ::geoDistanceMeters,
     private val clockMs: () -> Long = System::currentTimeMillis,
+    private val emitEvent: (LocationEvent) -> Unit = { LocationEventLog.emit(it) },
 ) {
 
     data class State(
@@ -65,6 +71,14 @@ internal class BackgroundLocationPublisher(
         val lastReadResult: String? = null,
         /** Whether a location is currently awaiting a publish decision. */
         val hasPendingLocation: Boolean = false,
+        /** Provider of the last fix received (observability only). */
+        val lastFixProvider: String? = null,
+        /** Accuracy of the last fix received (observability only). */
+        val lastFixAccuracyMeters: Float? = null,
+        /** Age of the last fix received, in ms (observability only). */
+        val lastFixAgeMs: Long? = null,
+        /** Last publish-decision reason (observability only). */
+        val lastPublishDecision: PublishDecisionReason? = null,
     )
 
     private val _state = MutableStateFlow(State())
@@ -117,21 +131,77 @@ internal class BackgroundLocationPublisher(
                 accuracy = sample.accuracyMeters,
                 recordedAtEpochMs = sample.recordedAtWallClockMs,
             )
-            _state.update { it.copy(hasPendingLocation = true) }
-        }
-        val pending = latestPending ?: return null
-        if (!shouldPublish(
-                nowMs = now,
-                neverPublished = lastPublished == null,
-                lastPublishAtMs = _state.value.lastPublishAtMs,
-                lastPublishAttemptAtMs = _state.value.lastPublishAttemptAtMs,
-                distanceFromLastPublishedMeters = lastPublished?.let { distanceMeters(it, pending) },
-                pendingAccuracyMeters = pending.accuracy,
-                minPublishIntervalMs = LocationForegroundService.MIN_PUBLISH_INTERVAL_MS,
-                distanceThresholdMeters = LocationForegroundService.DISTANCE_THRESHOLD_METERS,
-                maxPublishIntervalMs = LocationForegroundService.MAX_PUBLISH_INTERVAL_MS,
+            _state.update {
+                it.copy(
+                    hasPendingLocation = true,
+                    lastFixProvider = sample.provider,
+                    lastFixAccuracyMeters = sample.accuracyMeters,
+                    lastFixAgeMs = sample.ageMs,
+                )
+            }
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_FIX_RECEIVED,
+                    listOf(
+                        "provider" to sample.provider,
+                        "accuracyMeters" to sample.accuracyMeters,
+                        "ageMs" to sample.ageMs,
+                        "hasAccuracy" to sample.hasAccuracy,
+                    ),
+                ),
             )
-        ) {
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_PENDING_UPDATED,
+                    listOf(
+                        "accuracyMeters" to sample.accuracyMeters,
+                        "ageMs" to sample.ageMs,
+                    ),
+                ),
+            )
+        }
+        val pending = latestPending ?: run {
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_PUBLISH_DECISION,
+                    listOf(
+                        "decision" to "SKIP",
+                        "reason" to PublishDecisionReason.NO_FIX.name,
+                        "sinceLastAttemptMs" to _state.value.lastPublishAttemptAtMs?.let { now - it },
+                        "sinceLastSuccessMs" to _state.value.lastPublishAtMs?.let { now - it },
+                    ),
+                ),
+            )
+            return null
+        }
+        val distance = lastPublished?.let { distanceMeters(it, pending) }
+        val sinceLastAttemptMs = _state.value.lastPublishAttemptAtMs?.let { now - it }
+        val sinceLastSuccessMs = _state.value.lastPublishAtMs?.let { now - it }
+        val decision = shouldPublish(
+            nowMs = now,
+            neverPublished = lastPublished == null,
+            lastPublishAtMs = _state.value.lastPublishAtMs,
+            lastPublishAttemptAtMs = _state.value.lastPublishAttemptAtMs,
+            distanceFromLastPublishedMeters = distance,
+            pendingAccuracyMeters = pending.accuracy,
+            minPublishIntervalMs = LocationForegroundService.MIN_PUBLISH_INTERVAL_MS,
+            distanceThresholdMeters = LocationForegroundService.DISTANCE_THRESHOLD_METERS,
+            maxPublishIntervalMs = LocationForegroundService.MAX_PUBLISH_INTERVAL_MS,
+        )
+        _state.update { it.copy(lastPublishDecision = decision.reason) }
+        emitEvent(
+            LocationEvent(
+                LocationEventLog.EVENT_PUBLISH_DECISION,
+                listOf(
+                    "decision" to if (decision.shouldPublish) "PUBLISH" else "SKIP",
+                    "reason" to decision.reason.name,
+                    "distanceMeters" to distance,
+                    "sinceLastAttemptMs" to sinceLastAttemptMs,
+                    "sinceLastSuccessMs" to sinceLastSuccessMs,
+                ),
+            ),
+        )
+        if (!decision.shouldPublish) {
             return null
         }
         _state.update { it.copy(lastPublishAttemptAtMs = now) }
@@ -163,6 +233,40 @@ internal class BackgroundLocationPublisher(
 }
 
 /**
+ * Outcome of the adaptive publish decision: whether to publish and why.
+ *
+ * The reason is derived from the CURRENT policy only (never-published, minimum
+ * publish interval, maximum publish interval, movement threshold adjusted by
+ * accuracy). V2 freshness/accuracy/backoff rules are NOT part of this phase.
+ */
+enum class PublishDecisionReason {
+    /** Nothing was ever published successfully. */
+    FIRST,
+    /** Fewer than the minimum publish interval elapsed since the last attempt. */
+    MIN_INTERVAL,
+    /** Maximum publish interval elapsed since the last successful publish. */
+    MAX_INTERVAL,
+    /** Moved at least max(distanceThreshold, accuracy) beyond the last publish. */
+    MOVEMENT,
+    /** Movement below the accuracy-adjusted threshold. */
+    BELOW_MOVEMENT_THRESHOLD,
+    /** No last-published reference to measure against. */
+    NO_DISTANCE,
+    /** No pending fix to decide on. */
+    NO_FIX;
+
+    /** Whether this reason implies an actual publish. */
+    val publishes: Boolean
+        get() = this == FIRST || this == MAX_INTERVAL || this == MOVEMENT
+}
+
+/** Pure, injectable publish decision: whether to publish and the reason. */
+data class PublishDecision(
+    val shouldPublish: Boolean,
+    val reason: PublishDecisionReason,
+)
+
+/**
  * Adaptive publish decision. Publish when:
  *  - nothing was ever published, OR
  *  - at least [minPublishIntervalMs] elapsed since the last attempt AND
@@ -171,7 +275,8 @@ internal class BackgroundLocationPublisher(
  *
  * The movement threshold is `max(distanceThresholdMeters, accuracy)` so GPS
  * jitter within the reported accuracy never triggers a publish. Pure and
- * injectable for tests.
+ * injectable for tests. The Boolean semantics are exactly the previous
+ * `shouldPublish`; only the reason is new.
  */
 internal fun shouldPublish(
     nowMs: Long,
@@ -183,16 +288,25 @@ internal fun shouldPublish(
     minPublishIntervalMs: Long,
     distanceThresholdMeters: Double,
     maxPublishIntervalMs: Long,
-): Boolean {
-    if (neverPublished) return true
+): PublishDecision {
+    if (neverPublished) return PublishDecision(true, PublishDecisionReason.FIRST)
     val sinceAttempt = lastPublishAttemptAtMs?.let { nowMs - it } ?: Long.MAX_VALUE
-    if (sinceAttempt < minPublishIntervalMs) return false
+    if (sinceAttempt < minPublishIntervalMs) {
+        return PublishDecision(false, PublishDecisionReason.MIN_INTERVAL)
+    }
     val sincePublish = lastPublishAtMs?.let { nowMs - it } ?: Long.MAX_VALUE
-    if (sincePublish >= maxPublishIntervalMs) return true
-    val distance = distanceFromLastPublishedMeters ?: return false
+    if (sincePublish >= maxPublishIntervalMs) {
+        return PublishDecision(true, PublishDecisionReason.MAX_INTERVAL)
+    }
+    val distance = distanceFromLastPublishedMeters
+        ?: return PublishDecision(false, PublishDecisionReason.NO_DISTANCE)
     val accuracy = pendingAccuracyMeters?.takeIf { !it.isNaN() && it >= 0f } ?: 0f
     val threshold = max(distanceThresholdMeters, accuracy.toDouble())
-    return distance >= threshold
+    return if (distance >= threshold) {
+        PublishDecision(true, PublishDecisionReason.MOVEMENT)
+    } else {
+        PublishDecision(false, PublishDecisionReason.BELOW_MOVEMENT_THRESHOLD)
+    }
 }
 
 /** Great-circle distance via the Android location stack. */

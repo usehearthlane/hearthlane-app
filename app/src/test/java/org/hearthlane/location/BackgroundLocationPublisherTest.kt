@@ -53,6 +53,7 @@ class BackgroundLocationPublisherTest {
         checkIntervalMs: Long = 1_000L,
         clock: Clock = Clock(),
         onPublishFailure: (() -> Unit)? = null,
+        events: MutableList<LocationEvent>? = null,
     ) = BackgroundLocationPublisher(
         readLocation = read,
         publish = { id, loc -> relay.publishLocation(id, loc) },
@@ -62,6 +63,7 @@ class BackgroundLocationPublisherTest {
         onPublishFailure = onPublishFailure,
         distanceMeters = ::distanceMeters,
         clockMs = { clock.ms },
+        emitEvent = { if (events != null) events += it },
     )
 
     /** Advances the wall-clock (for the publish policy) and the loop cadence. */
@@ -319,5 +321,130 @@ class BackgroundLocationPublisherTest {
         assertEquals(LocationReadStatus.NO_POSITION.name, state.lastReadResult)
         assertEquals(false, state.hasPendingLocation)
         assertNull("no fix never produces a publish attempt", state.lastPublishResult)
+    }
+
+    @Test
+    fun `events cover fix received pending updated and decision on a successful cycle`() = runTest {
+        val relay = FakeRelayClient()
+        val clock = Clock()
+        val events = mutableListOf<LocationEvent>()
+        val pub = publisher(relay, read = { sample(1.0, 100L) }, clock = clock, events = events)
+
+        pub.start()
+        runCurrent()
+
+        assertEquals(1, pub.state.value.publishCount)
+        val names = events.map { it.name }
+        assertTrue(names.contains(LocationEventLog.EVENT_FIX_RECEIVED))
+        assertTrue(names.contains(LocationEventLog.EVENT_PENDING_UPDATED))
+        assertTrue(names.contains(LocationEventLog.EVENT_PUBLISH_DECISION))
+
+        val received = events.first { it.name == LocationEventLog.EVENT_FIX_RECEIVED }
+        assertEquals("network", received.fields.first { it.first == "provider" }.second)
+        assertEquals(20f, received.fields.first { it.first == "accuracyMeters" }.second)
+        assertEquals(0L, received.fields.first { it.first == "ageMs" }.second)
+        assertEquals(true, received.fields.first { it.first == "hasAccuracy" }.second)
+
+        val decision = events.first { it.name == LocationEventLog.EVENT_PUBLISH_DECISION }
+        assertEquals("PUBLISH", decision.fields.first { it.first == "decision" }.second)
+        assertEquals(PublishDecisionReason.FIRST.name, decision.fields.first { it.first == "reason" }.second)
+        assertEquals(
+            "no last publish yet means no since fields",
+            null,
+            decision.fields.firstOrNull { it.first == "sinceLastAttemptMs" }?.second,
+        )
+        assertEquals(
+            "no last publish yet means no since-success field",
+            null,
+            decision.fields.firstOrNull { it.first == "sinceLastSuccessMs" }?.second,
+        )
+    }
+
+    @Test
+    fun `no fix emits a SKIP decision with reason NO_FIX`() = runTest {
+        val relay = FakeRelayClient()
+        val clock = Clock()
+        val events = mutableListOf<LocationEvent>()
+        val pub = publisher(
+            relay,
+            read = { LocationReadResult(LocationReadStatus.NO_POSITION, message = "no fix") },
+            clock = clock,
+            events = events,
+        )
+
+        pub.start()
+        runCurrent()
+
+        val decision = events.first { it.name == LocationEventLog.EVENT_PUBLISH_DECISION }
+        assertEquals("SKIP", decision.fields.first { it.first == "decision" }.second)
+        assertEquals(PublishDecisionReason.NO_FIX.name, decision.fields.first { it.first == "reason" }.second)
+        assertFalse("no fix events never carry a received fix", events.any { it.name == LocationEventLog.EVENT_FIX_RECEIVED })
+    }
+
+    @Test
+    fun `stationary cycle emits a SKIP decision with reason BELOW_MOVEMENT_THRESHOLD`() = runTest {
+        val relay = FakeRelayClient()
+        val clock = Clock()
+        val events = mutableListOf<LocationEvent>()
+        val pub = publisher(
+            relay,
+            read = { sample(1.0, 100L) },
+            clock = clock,
+            events = events,
+        )
+
+        pub.start()
+        runCurrent()
+        events.clear()
+
+        // Second cycle: same position as the published one, past the minimum
+        // interval, far below the movement threshold.
+        tick(clock, 60_000L)
+
+        val decision = events.first { it.name == LocationEventLog.EVENT_PUBLISH_DECISION }
+        assertEquals("SKIP", decision.fields.first { it.first == "decision" }.second)
+        assertEquals(
+            PublishDecisionReason.BELOW_MOVEMENT_THRESHOLD.name,
+            decision.fields.first { it.first == "reason" }.second,
+        )
+        assertEquals(0.0, decision.fields.first { it.first == "distanceMeters" }.second as Double, 0.0)
+        assertEquals(60_000L, decision.fields.first { it.first == "sinceLastAttemptMs" }.second)
+        assertEquals(60_000L, decision.fields.first { it.first == "sinceLastSuccessMs" }.second)
+        assertEquals("state mirrors the last decision", PublishDecisionReason.BELOW_MOVEMENT_THRESHOLD, pub.state.value.lastPublishDecision)
+    }
+
+    @Test
+    fun `fix metadata is mirrored into the publisher state`() = runTest {
+        val relay = FakeRelayClient()
+        val clock = Clock()
+        val pub = publisher(
+            relay,
+            read = {
+                LocationReadResult(
+                    status = LocationReadStatus.SUCCESS,
+                    sample = LocationSample(
+                        provider = "gps",
+                        latitude = 1.0,
+                        longitude = 0.0,
+                        accuracyMeters = 15f,
+                        recordedAtWallClockMs = 100L,
+                        recordedAtElapsedNanos = 0L,
+                        ageMs = 42L,
+                        acquisitionMs = 0L,
+                        fromLastKnown = false,
+                    ),
+                )
+            },
+            clock = clock,
+        )
+
+        pub.start()
+        runCurrent()
+
+        val state = pub.state.value
+        assertEquals("gps", state.lastFixProvider)
+        assertEquals(15f, state.lastFixAccuracyMeters)
+        assertEquals(42L, state.lastFixAgeMs)
+        assertEquals(PublishDecisionReason.FIRST, state.lastPublishDecision)
     }
 }

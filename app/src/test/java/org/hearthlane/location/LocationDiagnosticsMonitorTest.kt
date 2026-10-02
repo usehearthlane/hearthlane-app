@@ -48,6 +48,10 @@ class LocationDiagnosticsMonitorTest {
             lastPublishAtMs = 1_700_000_000_000L,
             lastReadResult = LocationReadStatus.SUCCESS.name,
             hasPendingLocation = true,
+            lastFixProvider = "network",
+            lastFixAccuracyMeters = 20f,
+            lastFixAgeMs = 1_500L,
+            lastPublishDecision = PublishDecisionReason.MOVEMENT,
         )
 
         LocationDiagnosticsMonitor.onPublisherState(publisherState)
@@ -59,6 +63,10 @@ class LocationDiagnosticsMonitorTest {
         assertEquals(1_700_000_000_000L, state.lastPublishAtMs)
         assertEquals(LocationReadStatus.SUCCESS.name, state.lastReadResult)
         assertTrue(state.hasPendingLocation)
+        assertEquals("network", state.lastFixProvider)
+        assertEquals(20f, state.lastFixAccuracyMeters)
+        assertEquals(1_500L, state.lastFixAgeMs)
+        assertEquals(PublishDecisionReason.MOVEMENT.name, state.lastPublishDecision)
     }
 
     @Test
@@ -72,5 +80,6 @@ class LocationDiagnosticsMonitorTest {
         val state = LocationDiagnosticsMonitor.state.value
         assertFalse(state.publisherRunning)
         assertNull("no stale success is invented", state.lastPublishAtMs)
+        assertNull("no stale fix metadata is invented", state.lastFixProvider)
     }
 }

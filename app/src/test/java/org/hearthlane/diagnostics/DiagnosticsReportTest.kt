@@ -193,9 +193,100 @@ class DiagnosticsReportTest {
         assertFalse(report.contains("latitude"))
         assertFalse(report.contains("longitude"))
         assertFalse(report.contains("recordedAtEpochMs"))
-        assertFalse(report.contains("accuracy"))
         assertFalse(report.contains("Authorization"))
         assertFalse(report.contains("Bearer"))
+    }
+
+    @Test
+    fun `location report renders the phase 1 observability fields`() {
+        val location = LocationDiagnosticsSnapshot(
+            sharingEnabled = "Yes",
+            foregroundPermission = "Granted",
+            backgroundPermission = "Granted",
+            locationServices = "Enabled",
+            foregroundService = "Running",
+            publisherState = "Waiting",
+            publisherMode = "Background",
+            locationCheckIntervalLabel = "1 min",
+            minPublishIntervalLabel = "30 sec",
+            movementThresholdLabel = "100 m",
+            maxPublishIntervalLabel = "5 min",
+            mapActiveIntervalLabel = "30 sec",
+            lastRead = "16:57:12",
+            lastReadResult = "Success",
+            lastPublishAttempt = "16:57:13",
+            lastPublishResult = "Success",
+            lastSuccessfulPublish = "16:57:13",
+            pendingLocation = "No",
+            relay = "Reachable",
+            deviceId = "hearthlane-ab12cd34",
+            deviceNickname = "Meu celular",
+            lastFixProvider = "gps",
+            lastFixAccuracy = "12 m",
+            lastFixAge = "90 sec",
+            lastPublishDecision = "PUBLISH MOVEMENT",
+            tsnetState = "Running",
+            tsnetStarts = 3,
+            tsnetStops = 3,
+            tsnetLastStartDuration = "4.2 s",
+            tsnetLastStartAt = "1h02m03s",
+            tsnetLastStopAt = "1h01m58s",
+            tsnetLastTransport = "TAILSCALE",
+            tsnetLastNetwork = "WIFI",
+            tsnetPublishAttempts = 5,
+            tsnetPublishSuccesses = 4,
+            tsnetPublishFailures = 1,
+        )
+        val report = DiagnosticsReport.build(snapshot.copy(location = location))
+
+        assertTrue(report.contains("Last fix provider: gps"))
+        assertTrue(report.contains("Last fix accuracy: 12 m"))
+        assertTrue(report.contains("Last fix age: 90 sec"))
+        assertTrue(report.contains("Last publish decision: PUBLISH MOVEMENT"))
+        assertTrue(report.contains("Location tsnet state: Running"))
+        assertTrue(report.contains("Location tsnet starts: 3"))
+        assertTrue(report.contains("Location tsnet stops: 3"))
+        assertTrue(report.contains("Location tsnet last start duration: 4.2 s"))
+        assertTrue(report.contains("Location tsnet last start at: 1h02m03s (elapsed)"))
+        assertTrue(report.contains("Location tsnet last stop at: 1h01m58s (elapsed)"))
+        assertTrue(report.contains("Location tsnet last transport: TAILSCALE"))
+        assertTrue(report.contains("Location tsnet last network: WIFI"))
+        assertTrue(report.contains("Location tsnet publishes: attempts 5, success 4, failures 1"))
+    }
+
+    @Test
+    fun `location report renders n a for missing observability fields`() {
+        val location = LocationDiagnosticsSnapshot(
+            sharingEnabled = "Yes",
+            foregroundPermission = "Granted",
+            backgroundPermission = "Granted",
+            locationServices = "Enabled",
+            foregroundService = "Running",
+            publisherState = "Waiting",
+            publisherMode = "Background",
+            locationCheckIntervalLabel = "1 min",
+            minPublishIntervalLabel = "30 sec",
+            movementThresholdLabel = "100 m",
+            maxPublishIntervalLabel = "5 min",
+            mapActiveIntervalLabel = "30 sec",
+            lastRead = null,
+            lastReadResult = null,
+            lastPublishAttempt = null,
+            lastPublishResult = null,
+            lastSuccessfulPublish = null,
+            pendingLocation = "No",
+            relay = "Unknown",
+            deviceId = "hearthlane-ab12cd34",
+            deviceNickname = "(unset)",
+        )
+        val report = DiagnosticsReport.build(snapshot.copy(location = location))
+
+        assertTrue(report.contains("Last fix provider: n/a"))
+        assertTrue(report.contains("Last fix accuracy: n/a"))
+        assertTrue(report.contains("Last fix age: n/a"))
+        assertTrue(report.contains("Last publish decision: n/a"))
+        assertTrue(report.contains("Location tsnet last start at: Never"))
+        assertTrue(report.contains("Location tsnet last stop at: Never"))
     }
 
     @Test

@@ -71,11 +71,29 @@ object DiagnosticsReport {
             appendLine("Maximum publish interval: ${location.maxPublishIntervalLabel}")
             appendLine("Map-active interval: ${location.mapActiveIntervalLabel}")
             appendLine("Last location read: ${location.lastRead?.let { "$it (${location.lastReadResult ?: "n/a"})" } ?: "Never"}")
+            appendLine("Last fix provider: ${location.lastFixProvider ?: "n/a"}")
+            appendLine("Last fix accuracy: ${location.lastFixAccuracy ?: "n/a"}")
+            appendLine("Last fix age: ${location.lastFixAge ?: "n/a"}")
+            appendLine("Last publish decision: ${location.lastPublishDecision ?: "n/a"}")
             appendLine("Last publish attempt: ${location.lastPublishAttempt ?: "Never"}")
             appendLine("Last publish result: ${location.lastPublishResult ?: "n/a"}")
             appendLine("Last successful publish: ${location.lastSuccessfulPublish ?: "Never"}")
             appendLine("Pending location: ${location.pendingLocation}")
             appendLine("Relay: ${location.relay}")
+            appendLine("Location tsnet state: ${location.tsnetState}")
+            appendLine("Location tsnet starts: ${location.tsnetStarts}")
+            appendLine("Location tsnet stops: ${location.tsnetStops}")
+            appendLine("Location tsnet last start duration: ${location.tsnetLastStartDuration ?: "n/a"}")
+            appendLine("Location tsnet last start at: ${location.tsnetLastStartAt?.let { "$it (elapsed)" } ?: "Never"}")
+            appendLine("Location tsnet last stop at: ${location.tsnetLastStopAt?.let { "$it (elapsed)" } ?: "Never"}")
+            appendLine("Location tsnet last transport: ${location.tsnetLastTransport ?: "n/a"}")
+            appendLine("Location tsnet last network: ${location.tsnetLastNetwork ?: "n/a"}")
+            appendLine(
+                "Location tsnet publishes: " +
+                    "attempts ${location.tsnetPublishAttempts}, " +
+                    "success ${location.tsnetPublishSuccesses}, " +
+                    "failures ${location.tsnetPublishFailures}",
+            )
             appendLine("Device ID: ${sanitize(location.deviceId)}")
             appendLine("Device nickname: ${sanitize(location.deviceNickname)}")
         }

@@ -102,12 +102,16 @@ class RelayPublishSessionTest {
     private fun session(
         gateway: CountingGateway,
         kind: RelayTransportKind,
+        events: MutableList<LocationEvent>? = null,
+        clock: () -> Long = { 1_000L },
     ) = RelayPublishSession(
         gateway = gateway,
         config = { RelayConfig("http://relay.local", "http://relay.hearthlane.example") },
         connector = connectorFor(gateway, kind),
         networkType = { "WIFI" },
         lifecycle = TsnetLifecycleMonitor,
+        emitEvent = { if (events != null) events += it },
+        clockMs = clock,
     )
 
     @Test
@@ -251,5 +255,91 @@ class RelayPublishSessionTest {
         assertEquals(2, gateway.httpRequestCalls)
         assertEquals(2, gateway.stopCalls)
         assertEquals(2, TsnetLifecycleMonitor.state.value.startCount)
+    }
+
+    @Test
+    fun `successful remote publish emits start and success events with transport`() = runTest {
+        val gateway = CountingGateway()
+        val events = mutableListOf<LocationEvent>()
+        var now = 1_000L
+        val session = session(gateway, RelayTransportKind.TAILSCALE, events = events, clock = { now })
+
+        now = 1_000L
+        val status = session.publish("d1", location)
+        assertEquals(204, status)
+
+        val start = events.first { it.name == LocationEventLog.EVENT_PUBLISH_START }
+        assertEquals("TAILSCALE", start.fields.first { it.first == "transport" }.second)
+
+        val success = events.first { it.name == LocationEventLog.EVENT_PUBLISH_SUCCESS }
+        assertEquals("TAILSCALE", success.fields.first { it.first == "transport" }.second)
+        assertEquals("elapsed measures the attempt", 0L, success.fields.first { it.first == "elapsedMs" }.second)
+        assertTrue("no failure event on success", events.none { it.name == LocationEventLog.EVENT_PUBLISH_FAILURE })
+    }
+
+    @Test
+    fun `failed remote publish emits a failure event with category NETWORK`() = runTest {
+        val gateway = CountingGateway().apply { failPublish = true }
+        val events = mutableListOf<LocationEvent>()
+        val session = session(gateway, RelayTransportKind.TAILSCALE, events = events)
+
+        try {
+            session.publish("d1", location)
+        } catch (e: IOException) {
+            // expected
+        }
+
+        val start = events.first { it.name == LocationEventLog.EVENT_PUBLISH_START }
+        assertEquals("TAILSCALE", start.fields.first { it.first == "transport" }.second)
+        val failure = events.first { it.name == LocationEventLog.EVENT_PUBLISH_FAILURE }
+        assertEquals("TAILSCALE", failure.fields.first { it.first == "transport" }.second)
+        assertEquals("NETWORK", failure.fields.first { it.first == "category" }.second)
+        assertTrue(
+            "elapsedMs must be present and non-negative",
+            (failure.fields.first { it.first == "elapsedMs" }.second as Long) >= 0L,
+        )
+        assertTrue("no success event on failure", events.none { it.name == LocationEventLog.EVENT_PUBLISH_SUCCESS })
+    }
+
+    @Test
+    fun `pending enrollment emits a failure event with category AUTH_REQUIRED and no transport`() = runTest {
+        val gateway = CountingGateway().apply { authRequired = true }
+        val events = mutableListOf<LocationEvent>()
+        val session = session(gateway, RelayTransportKind.TAILSCALE, events = events)
+
+        try {
+            session.publish("d1", location)
+        } catch (e: Exception) {
+            // expected
+        }
+
+        val failure = events.first { it.name == LocationEventLog.EVENT_PUBLISH_FAILURE }
+        assertEquals("AUTH_REQUIRED", failure.fields.first { it.first == "category" }.second)
+        assertEquals(
+            "transport is unknown when the connect itself failed",
+            null,
+            failure.fields.firstOrNull { it.first == "transport" }?.second,
+        )
+        assertTrue("no start event when the transport never resolved", events.none { it.name == LocationEventLog.EVENT_PUBLISH_START })
+    }
+
+    @Test
+    fun `local publish failure still emits a failure event without touching tsnet`() = runTest {
+        val gateway = CountingGateway()
+        val events = mutableListOf<LocationEvent>()
+        val session = session(gateway, RelayTransportKind.LOCAL, events = events)
+
+        try {
+            session.publish("d1", location)
+        } catch (e: Exception) {
+            // expected: local HTTP cannot reach the relay in a unit test
+        }
+
+        val start = events.first { it.name == LocationEventLog.EVENT_PUBLISH_START }
+        assertEquals("LOCAL", start.fields.first { it.first == "transport" }.second)
+        val failure = events.first { it.name == LocationEventLog.EVENT_PUBLISH_FAILURE }
+        assertEquals("LOCAL", failure.fields.first { it.first == "transport" }.second)
+        assertEquals("NETWORK", failure.fields.first { it.first == "category" }.second)
+        assertEquals("LOCAL must never start the node", 0, gateway.ensureCalls)
     }
 }

@@ -46,6 +46,7 @@ import org.hearthlane.diagnostics.buildDiagnosticsSnapshot
 import org.hearthlane.diagnostics.buildLocationDiagnosticsSnapshot
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationPermissionSnapshot
+import org.hearthlane.location.TsnetLifecycleMonitor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 
@@ -79,6 +80,7 @@ fun DiagnosticsScreen(
     val sharing by sharingEnabled.collectAsState()
     val nickname by deviceNickname.collectAsState()
     val publishing by LocationDiagnosticsMonitor.state.collectAsState()
+    val tsnetLifecycle by TsnetLifecycleMonitor.state.collectAsState()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -102,6 +104,7 @@ fun DiagnosticsScreen(
         relay = relayConnection,
         deviceId = nodeHostname,
         deviceNickname = nickname,
+        tsnet = tsnetLifecycle,
     )
 
     val report = remember(

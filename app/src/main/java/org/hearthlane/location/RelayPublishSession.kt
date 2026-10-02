@@ -1,5 +1,6 @@
 package org.hearthlane.location
 
+import android.os.SystemClock
 import org.hearthlane.core.connectivity.TsnetGateway
 import org.hearthlane.core.relay.DeviceLocation
 import org.hearthlane.core.relay.HttpRelayClient
@@ -41,6 +42,8 @@ internal class RelayPublishSession(
     private val connector: suspend (RelayConfig) -> RelayConnection = defaultConnect(gateway),
     private val networkType: () -> String? = { null },
     private val lifecycle: TsnetLifecycleMonitor = TsnetLifecycleMonitor,
+    private val emitEvent: (LocationEvent) -> Unit = { LocationEventLog.emit(it) },
+    private val clockMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     private var connection: RelayConnection? = null
     private var lastTransport: RelayTransportKind? = null
@@ -53,18 +56,50 @@ internal class RelayPublishSession(
      * the LAST consumer — a remote publish can never tear down a node the
      * foreground is still using. A cached remote connection is invalidated so a
      * later publish can reconnect cleanly.
+     *
+     * Emits publish-start once the transport is known, then publish-success or
+     * publish-failure with the transport, the coarse failure category and the
+     * attempt duration (connect + request). No coordinates are ever emitted.
      */
     suspend fun publish(deviceId: String, location: DeviceLocation): Int {
         lifecycle.onPublishAttempt(networkType())
+        val startedAt = clockMs()
         try {
             val client = client()
+            val transport = lastTransport?.name
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_PUBLISH_START,
+                    listOf("transport" to transport),
+                ),
+            )
             val status = client.publishLocation(deviceId, location)
-            lifecycle.onPublishSuccess(lastTransport?.name)
+            val elapsedMs = clockMs() - startedAt
+            lifecycle.onPublishSuccess(transport)
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_PUBLISH_SUCCESS,
+                    listOf(
+                        "transport" to transport,
+                        "elapsedMs" to elapsedMs,
+                    ),
+                ),
+            )
             return status
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             lifecycle.onPublishFailure(lastTransport?.name)
+            emitEvent(
+                LocationEvent(
+                    LocationEventLog.EVENT_PUBLISH_FAILURE,
+                    listOf(
+                        "transport" to lastTransport?.name,
+                        "category" to LocationEventLog.classifyFailure(e),
+                        "elapsedMs" to (clockMs() - startedAt),
+                    ),
+                ),
+            )
             throw e
         } finally {
             if (lastTransport == RelayTransportKind.TAILSCALE) {

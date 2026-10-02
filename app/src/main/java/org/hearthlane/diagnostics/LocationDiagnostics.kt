@@ -5,6 +5,8 @@ import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationForegroundService
 import org.hearthlane.location.LocationPermissionSnapshot
 import org.hearthlane.location.LocationReadStatus
+import org.hearthlane.location.PublishDecisionReason
+import org.hearthlane.location.TsnetLifecycleMonitor
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -14,8 +16,9 @@ import java.util.Locale
  * capability, shown in the technical (English) Diagnostics screen.
  *
  * The snapshot only ever contains safe metadata: states, modes, intervals,
- * timestamps, the device id/nickname and classified results. It never carries
- * coordinates, payloads, accuracy or any secret.
+ * timestamps, the device id/nickname, classified results, and — since V2
+ * Phase 1 — provider, accuracy, fix age, decision reasons, transport and
+ * durations. It never carries coordinates, payloads or any secret.
  */
 data class LocationDiagnosticsSnapshot(
     val sharingEnabled: String,
@@ -39,13 +42,29 @@ data class LocationDiagnosticsSnapshot(
     val relay: String,
     val deviceId: String,
     val deviceNickname: String,
+    val lastFixProvider: String? = null,
+    val lastFixAccuracy: String? = null,
+    val lastFixAge: String? = null,
+    val lastPublishDecision: String? = null,
+    val tsnetState: String = "Stopped",
+    val tsnetStarts: Int = 0,
+    val tsnetStops: Int = 0,
+    val tsnetLastStartDuration: String? = null,
+    val tsnetLastStartAt: String? = null,
+    val tsnetLastStopAt: String? = null,
+    val tsnetLastTransport: String? = null,
+    val tsnetLastNetwork: String? = null,
+    val tsnetPublishAttempts: Int = 0,
+    val tsnetPublishSuccesses: Int = 0,
+    val tsnetPublishFailures: Int = 0,
 )
 
 /**
  * Builds the [LocationDiagnosticsSnapshot] from the production state holders:
  * the persisted sharing preference, the real permission/location snapshot, the
- * publishing metadata reported by the foreground service monitor, the relay
- * connectivity and the device identity. Pure and testable without Android.
+ * publishing metadata reported by the foreground service monitor, the location
+ * tsnet lifecycle monitor, the relay connectivity and the device identity.
+ * Pure and testable without Android.
  */
 fun buildLocationDiagnosticsSnapshot(
     sharingEnabled: Boolean,
@@ -55,6 +74,7 @@ fun buildLocationDiagnosticsSnapshot(
     relay: RelayConnection?,
     deviceId: String,
     deviceNickname: String,
+    tsnet: TsnetLifecycleMonitor.State = TsnetLifecycleMonitor.state.value,
     locationCheckIntervalMs: Long = LocationForegroundService.BACKGROUND_INTERVAL_MS,
     minPublishIntervalMs: Long = LocationForegroundService.MIN_PUBLISH_INTERVAL_MS,
     distanceThresholdMeters: Double = LocationForegroundService.DISTANCE_THRESHOLD_METERS,
@@ -90,6 +110,21 @@ fun buildLocationDiagnosticsSnapshot(
     },
     deviceId = deviceId,
     deviceNickname = deviceNickname.ifBlank { "(unset)" },
+    lastFixProvider = publishing.lastFixProvider,
+    lastFixAccuracy = fixAccuracyLabel(publishing.lastFixAccuracyMeters),
+    lastFixAge = publishing.lastFixAgeMs?.let(::intervalLabel),
+    lastPublishDecision = publishDecisionLabel(publishing.lastPublishDecision),
+    tsnetState = if (tsnet.currentRunning) "Running" else "Stopped",
+    tsnetStarts = tsnet.startCount,
+    tsnetStops = tsnet.stopCount,
+    tsnetLastStartDuration = tsnet.lastStartDurationMs?.let { durationLabel(it) },
+    tsnetLastStartAt = tsnet.lastStartElapsedRealtime?.let(::formatUptime),
+    tsnetLastStopAt = tsnet.lastStopElapsedRealtime?.let(::formatUptime),
+    tsnetLastTransport = tsnet.lastTransport,
+    tsnetLastNetwork = tsnet.lastNetworkType,
+    tsnetPublishAttempts = tsnet.publishAttemptCount,
+    tsnetPublishSuccesses = tsnet.publishSuccessCount,
+    tsnetPublishFailures = tsnet.publishFailureCount,
 )
 
 /** "Waiting" while the loop is up and the last publish succeeded, "Error" when
@@ -145,6 +180,49 @@ fun classifyResult(raw: String?): String? = when {
 /** "HH:mm:ss" local time for a wall-clock timestamp, or null when never. */
 private fun timeLabel(atMs: Long?): String? = atMs?.let {
     TIME_FORMAT.format(Date(it))
+}
+
+/**
+ * Accuracy label for the last fix ("20 m"), or null when never; "n/a" for a
+ * non-usable value (NaN/negative), matching the map's accuracy display rules.
+ */
+fun fixAccuracyLabel(accuracyMeters: Float?): String? = when {
+    accuracyMeters == null -> null
+    accuracyMeters.isNaN() || accuracyMeters < 0f -> "n/a"
+    else -> "${Math.round(accuracyMeters)} m"
+}
+
+/**
+ * Developer-oriented publish-decision label ("PUBLISH MOVEMENT"), or null when
+ * no decision was made yet. The reason name is the stable enum name used in
+ * the structured events.
+ */
+fun publishDecisionLabel(reasonName: String?): String? = reasonName?.let {
+    val reason = runCatching { PublishDecisionReason.valueOf(it) }.getOrNull()
+    if (reason == null) it else "${if (reason.publishes) "PUBLISH" else "SKIP"} ${reason.name}"
+}
+
+/** Duration label for a short measurement ("4.2 s"). */
+fun durationLabel(ms: Long): String = if (ms < 1_000L) {
+    "$ms ms"
+} else {
+    "%.1f s".format(Locale.US, ms / 1_000.0)
+}
+
+/**
+ * Uptime label for an `elapsedRealtime` timestamp ("1h02m03s"), relative to
+ * boot like the monotonic clock it formats. Pure and testable.
+ */
+fun formatUptime(ms: Long): String {
+    val totalSeconds = (ms / 1_000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3_600L
+    val minutes = (totalSeconds % 3_600L) / 60L
+    val seconds = totalSeconds % 60L
+    return when {
+        hours > 0L -> "${hours}h${minutes.toString().padStart(2, '0')}m${seconds.toString().padStart(2, '0')}s"
+        minutes > 0L -> "${minutes}m${seconds.toString().padStart(2, '0')}s"
+        else -> "${seconds}s"
+    }
 }
 
 private fun yesNo(value: Boolean): String = if (value) "Yes" else "No"

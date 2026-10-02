@@ -34,6 +34,10 @@ object LocationDiagnosticsMonitor {
         val lastPublishAtMs: Long? = null,
         val hasPendingLocation: Boolean = false,
         val publishCount: Int = 0,
+        val lastFixProvider: String? = null,
+        val lastFixAccuracyMeters: Float? = null,
+        val lastFixAgeMs: Long? = null,
+        val lastPublishDecision: String? = null,
     )
 
     private val _state = MutableStateFlow(PublishingState())
@@ -61,6 +65,10 @@ object LocationDiagnosticsMonitor {
                 lastPublishAtMs = publisher.lastPublishAtMs,
                 hasPendingLocation = publisher.hasPendingLocation,
                 publishCount = publisher.publishCount,
+                lastFixProvider = publisher.lastFixProvider,
+                lastFixAccuracyMeters = publisher.lastFixAccuracyMeters,
+                lastFixAgeMs = publisher.lastFixAgeMs,
+                lastPublishDecision = publisher.lastPublishDecision?.name,
             )
         }
     }
