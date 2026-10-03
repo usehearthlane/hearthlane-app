@@ -61,6 +61,7 @@ import org.hearthlane.location.LocationForegroundService
 import org.hearthlane.location.LocationsQuery
 import org.hearthlane.location.LocationsUiController
 import org.hearthlane.location.MapActiveQueryController
+import org.hearthlane.location.PublisherMode
 import org.hearthlane.location.MapQueryStatus
 import kotlinx.coroutines.launch
 
@@ -142,14 +143,14 @@ fun LocationsScreen(
         if (activeCadence) {
             ContextCompat.startForegroundService(
                 context,
-                LocationForegroundService.intent(context, LocationForegroundService.ACTIVE_INTERVAL_MS),
+                LocationForegroundService.intent(context, PublisherMode.MAP_ACTIVE),
             )
         }
         onDispose {
             if (activeCadence) {
                 ContextCompat.startForegroundService(
                     context,
-                    LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+                    LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
                 )
             }
         }

@@ -758,7 +758,7 @@ private fun startOrStopLocationSharing(
                 context,
                 LocationForegroundService.intent(
                     context,
-                    LocationForegroundService.BACKGROUND_INTERVAL_MS,
+                    org.hearthlane.location.PublisherMode.BACKGROUND,
                 ),
             )
             true
@@ -769,7 +769,7 @@ private fun startOrStopLocationSharing(
         context.stopService(
             LocationForegroundService.intent(
                 context,
-                LocationForegroundService.BACKGROUND_INTERVAL_MS,
+                org.hearthlane.location.PublisherMode.BACKGROUND,
             ),
         )
         true

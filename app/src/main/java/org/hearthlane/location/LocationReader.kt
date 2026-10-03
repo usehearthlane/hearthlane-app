@@ -24,81 +24,36 @@ import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 
 /**
- * Thin foreground reader over android.location.LocationManager (no Google
- * Play Services).
+ * One-shot location reads over android.location.LocationManager (no Google
+ * Play Services). The explicit [provider] is chosen by the caller — the
+ * acquisition controller requests NETWORK for the initial fix and GPS on
+ * demand — and the SDK split (getCurrentLocation on API 30+,
+ * requestSingleUpdate on API 26-29) is handled here.
  *
- * Three paths, selected by SDK (see [LocationReadingStrategy]):
- * - last known:    LocationManager.getLastKnownLocation(provider)
- * - API 30+:       LocationManager.getCurrentLocation(provider, signal, executor, consumer)
- * - API 26-29:     LocationManager.requestSingleUpdate(provider, listener, looper)
- *
- * Everything runs on [ioDispatcher] and returns a [LocationReadResult]; real
- * fix quality (accuracy, freshness, battery) is validated on a physical
- * device, not in unit tests.
+ * Fix conversion to [LocationSample] lives in [toLocationSample] so the
+ * acquisition controller shares the exact same sample model and monotonic age
+ * computation for listener-delivered fixes.
  */
 @SuppressLint("MissingPermission")
 class LocationReader(
     private val context: Context,
     private val locationManager: LocationManager,
-    private val resolver: ProviderResolver = ProviderResolver(locationManager),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
     /**
-     * Reads the best last-known position from the enabled providers, in
-     * preference order. The fix may be arbitrarily old; its [LocationSample.ageMs]
-     * is always recorded and must never be treated as "current".
-     */
-    suspend fun readLastKnown(): LocationReadResult = withContext(ioDispatcher) {
-        if (!hasCoarsePermission()) return@withContext permissionDenied()
-
-        val nowElapsedNanos = SystemClock.elapsedRealtimeNanos()
-        for (provider in resolver.enabledProviders()) {
-            val location = runCatching { locationManager.getLastKnownLocation(provider) }
-                .getOrNull()
-            if (location != null) {
-                return@withContext LocationReadResult(
-                    status = LocationReadStatus.SUCCESS,
-                    sample = location.toSample(
-                        provider = location.provider ?: provider,
-                        nowElapsedNanos = nowElapsedNanos,
-                        acquisitionMs = 0L,
-                        fromLastKnown = true,
-                    ),
-                )
-            }
-        }
-
-        LocationReadResult(
-            status = if (resolver.isLocationEnabled()) {
-                LocationReadStatus.NO_POSITION
-            } else {
-                LocationReadStatus.LOCATION_DISABLED
-            },
-            message = "no last-known position",
-        )
-    }
-
-    /**
-     * Requests a fresh position on demand. Prefers network for a fast,
-     * coarse, low-power fix, falling back to GPS/passive. Uses
-     * getCurrentLocation on API 30+ and requestSingleUpdate on API 26-29,
-     * both bounded by [timeoutMs]. Never blocks the main thread.
+     * Requests a fresh one-shot position from [provider], bounded by
+     * [timeoutMs]. Never blocks the main thread. Returns
+     * NO_PERMISSION / LOCATION_DISABLED / TIMEOUT / NO_POSITION / SUCCESS.
      */
     @SuppressLint("NewApi")
-    suspend fun readCurrent(timeoutMs: Long = DEFAULT_CURRENT_TIMEOUT_MS): LocationReadResult =
+    suspend fun readCurrent(provider: String, timeoutMs: Long): LocationReadResult =
         withContext(ioDispatcher) {
             if (!hasCoarsePermission()) return@withContext permissionDenied()
-
-            val provider = resolver.preferredEnabledProvider()
-            if (provider == null) {
+            if (!locationManager.isProviderEnabled(provider)) {
                 return@withContext LocationReadResult(
-                    status = if (resolver.isLocationEnabled()) {
-                        LocationReadStatus.NO_POSITION
-                    } else {
-                        LocationReadStatus.LOCATION_DISABLED
-                    },
-                    message = "no enabled provider",
+                    status = LocationReadStatus.LOCATION_DISABLED,
+                    message = "provider disabled: $provider",
                 )
             }
 
@@ -131,7 +86,7 @@ class LocationReader(
 
             LocationReadResult(
                 status = LocationReadStatus.SUCCESS,
-                sample = location.toSample(
+                sample = location.toLocationSample(
                     provider = location.provider ?: provider,
                     nowElapsedNanos = SystemClock.elapsedRealtimeNanos(),
                     acquisitionMs = LocationTime.durationMs(
@@ -186,28 +141,29 @@ class LocationReader(
         status = LocationReadStatus.NO_PERMISSION,
         message = "missing ${Manifest.permission.ACCESS_COARSE_LOCATION}",
     )
+}
 
-    private fun Location.toSample(
-        provider: String,
-        nowElapsedNanos: Long,
-        acquisitionMs: Long,
-        fromLastKnown: Boolean,
-    ): LocationSample {
-        val recordedElapsed = runCatching { elapsedRealtimeNanos }.getOrDefault(nowElapsedNanos)
-        return LocationSample(
-            provider = provider,
-            latitude = latitude,
-            longitude = longitude,
-            accuracyMeters = runCatching { accuracy }.getOrDefault(Float.NaN),
-            recordedAtWallClockMs = time,
-            recordedAtElapsedNanos = recordedElapsed,
-            ageMs = LocationTime.ageMs(recordedElapsed, nowElapsedNanos),
-            acquisitionMs = acquisitionMs,
-            fromLastKnown = fromLastKnown,
-        )
-    }
-
-    private companion object {
-        const val DEFAULT_CURRENT_TIMEOUT_MS = 15_000L
-    }
+/**
+ * Converts a framework [Location] into the shared [LocationSample] model using
+ * the monotonic clock for age. Shared by the one-shot reader and the
+ * acquisition controller's listener callbacks.
+ */
+internal fun Location.toLocationSample(
+    provider: String,
+    nowElapsedNanos: Long,
+    acquisitionMs: Long,
+    fromLastKnown: Boolean,
+): LocationSample {
+    val recordedElapsed = runCatching { elapsedRealtimeNanos }.getOrDefault(nowElapsedNanos)
+    return LocationSample(
+        provider = provider,
+        latitude = latitude,
+        longitude = longitude,
+        accuracyMeters = runCatching { accuracy }.getOrDefault(Float.NaN),
+        recordedAtWallClockMs = time,
+        recordedAtElapsedNanos = recordedElapsed,
+        ageMs = LocationTime.ageMs(recordedElapsed, nowElapsedNanos),
+        acquisitionMs = acquisitionMs,
+        fromLastKnown = fromLastKnown,
+    )
 }

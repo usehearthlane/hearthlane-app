@@ -29,9 +29,9 @@ class LocationDiagnosticsMonitorTest {
     fun `service start and stop are reported`() {
         LocationDiagnosticsMonitor.resetForTest()
 
-        LocationDiagnosticsMonitor.onServiceStarted(LocationForegroundService.ACTIVE_INTERVAL_MS)
+        LocationDiagnosticsMonitor.onServiceStarted(PublisherMode.MAP_ACTIVE)
         assertTrue(LocationDiagnosticsMonitor.state.value.serviceRunning)
-        assertEquals(LocationForegroundService.ACTIVE_INTERVAL_MS, LocationDiagnosticsMonitor.state.value.intervalMs)
+        assertEquals(PublisherMode.MAP_ACTIVE.name, LocationDiagnosticsMonitor.state.value.mode)
 
         LocationDiagnosticsMonitor.onServiceStopped()
         assertFalse(LocationDiagnosticsMonitor.state.value.serviceRunning)
@@ -46,7 +46,6 @@ class LocationDiagnosticsMonitorTest {
             publishCount = 3,
             lastPublishResult = "Success",
             lastPublishAtMs = 1_700_000_000_000L,
-            lastReadResult = LocationReadStatus.SUCCESS.name,
             hasPendingLocation = true,
             lastFixProvider = "network",
             lastFixAccuracyMeters = 20f,
@@ -68,7 +67,6 @@ class LocationDiagnosticsMonitorTest {
         assertEquals(3, state.publishCount)
         assertEquals("Success", state.lastPublishResult)
         assertEquals(1_700_000_000_000L, state.lastPublishAtMs)
-        assertEquals(LocationReadStatus.SUCCESS.name, state.lastReadResult)
         assertTrue(state.hasPendingLocation)
         assertEquals("network", state.lastFixProvider)
         assertEquals(20f, state.lastFixAccuracyMeters)

@@ -44,6 +44,7 @@ import org.hearthlane.controller.RelayConnectionController
 import org.hearthlane.diagnostics.DiagnosticsReport
 import org.hearthlane.diagnostics.buildDiagnosticsSnapshot
 import org.hearthlane.diagnostics.buildLocationDiagnosticsSnapshot
+import org.hearthlane.location.AcquisitionDiagnosticsMonitor
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationPermissionSnapshot
 import org.hearthlane.location.TsnetLifecycleMonitor
@@ -81,6 +82,7 @@ fun DiagnosticsScreen(
     val nickname by deviceNickname.collectAsState()
     val publishing by LocationDiagnosticsMonitor.state.collectAsState()
     val tsnetLifecycle by TsnetLifecycleMonitor.state.collectAsState()
+    val acquisition by AcquisitionDiagnosticsMonitor.state.collectAsState()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -105,6 +107,7 @@ fun DiagnosticsScreen(
         deviceId = nodeHostname,
         deviceNickname = nickname,
         tsnet = tsnetLifecycle,
+        acquisition = acquisition,
     )
 
     val report = remember(

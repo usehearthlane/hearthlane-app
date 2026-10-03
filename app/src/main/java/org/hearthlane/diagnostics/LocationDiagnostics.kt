@@ -1,6 +1,7 @@
 package org.hearthlane.diagnostics
 
 import org.hearthlane.core.relay.RelayConnection
+import org.hearthlane.location.AcquisitionDiagnosticsMonitor
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationForegroundService
 import org.hearthlane.location.LocationPermissionSnapshot
@@ -29,13 +30,9 @@ data class LocationDiagnosticsSnapshot(
     val foregroundService: String,
     val publisherState: String,
     val publisherMode: String,
-    val locationCheckIntervalLabel: String,
     val minPublishIntervalLabel: String,
     val movementThresholdLabel: String,
     val presenceIntervalLabel: String,
-    val mapActiveIntervalLabel: String,
-    val lastRead: String?,
-    val lastReadResult: String?,
     val lastPublishAttempt: String?,
     val lastPublishResult: String?,
     val lastSuccessfulPublish: String?,
@@ -52,6 +49,12 @@ data class LocationDiagnosticsSnapshot(
     val presenceCount: Int = 0,
     val lastPresenceAt: String? = null,
     val lastPresenceDecision: String? = null,
+    val acquisitionProviders: String = "none",
+    val gpsInFlight: String = "No",
+    val lastGpsRequest: String? = null,
+    val lastGpsResult: String? = null,
+    val gpsRequests: Int = 0,
+    val gpsFailures: Int = 0,
     val tsnetState: String = "Stopped",
     val tsnetStarts: Int = 0,
     val tsnetStops: Int = 0,
@@ -69,8 +72,8 @@ data class LocationDiagnosticsSnapshot(
  * Builds the [LocationDiagnosticsSnapshot] from the production state holders:
  * the persisted sharing preference, the real permission/location snapshot, the
  * publishing metadata reported by the foreground service monitor, the location
- * tsnet lifecycle monitor, the relay connectivity and the device identity.
- * Pure and testable without Android.
+ * tsnet lifecycle monitor, the acquisition monitor, the relay connectivity and
+ * the device identity. Pure and testable without Android.
  */
 fun buildLocationDiagnosticsSnapshot(
     sharingEnabled: Boolean,
@@ -81,11 +84,10 @@ fun buildLocationDiagnosticsSnapshot(
     deviceId: String,
     deviceNickname: String,
     tsnet: TsnetLifecycleMonitor.State = TsnetLifecycleMonitor.state.value,
-    locationCheckIntervalMs: Long = LocationForegroundService.BACKGROUND_INTERVAL_MS,
+    acquisition: AcquisitionDiagnosticsMonitor.State = AcquisitionDiagnosticsMonitor.state.value,
     minPublishIntervalMs: Long = LocationPolicy.MIN_PUBLISH_INTERVAL_MS,
     distanceThresholdMeters: Double = LocationPolicy.DISTANCE_THRESHOLD_METERS,
     presenceIntervalMs: Long = LocationPolicy.PRESENCE_INTERVAL_MS,
-    mapActiveIntervalMs: Long = LocationForegroundService.ACTIVE_INTERVAL_MS,
 ): LocationDiagnosticsSnapshot = LocationDiagnosticsSnapshot(
     sharingEnabled = yesNo(sharingEnabled),
     foregroundPermission = if (permissions.foregroundGranted) "Granted" else "Denied",
@@ -97,14 +99,10 @@ fun buildLocationDiagnosticsSnapshot(
     locationServices = if (permissions.locationEnabled) "Enabled" else "Disabled",
     foregroundService = if (publishing.serviceRunning) "Running" else "Stopped",
     publisherState = publisherStateLabel(publishing),
-    publisherMode = publisherModeLabel(sharingEnabled, publishing.intervalMs, mapActiveIntervalMs),
-    locationCheckIntervalLabel = intervalLabel(locationCheckIntervalMs),
+    publisherMode = publisherModeLabel(sharingEnabled, publishing.mode),
     minPublishIntervalLabel = intervalLabel(minPublishIntervalMs),
     movementThresholdLabel = "${distanceThresholdMeters.toInt()} m",
     presenceIntervalLabel = intervalLabel(presenceIntervalMs),
-    mapActiveIntervalLabel = intervalLabel(mapActiveIntervalMs),
-    lastRead = timeLabel(publishing.lastReadAtMs),
-    lastReadResult = classifyReadResult(publishing.lastReadResult),
     lastPublishAttempt = timeLabel(publishing.lastPublishAttemptAtMs),
     lastPublishResult = classifyResult(publishing.lastPublishResult),
     lastSuccessfulPublish = timeLabel(publishing.lastPublishAtMs),
@@ -125,6 +123,14 @@ fun buildLocationDiagnosticsSnapshot(
     presenceCount = publishing.presenceCount,
     lastPresenceAt = publishing.lastPresenceAtMs?.let(::formatUptime),
     lastPresenceDecision = publishing.lastPresenceDecision,
+    acquisitionProviders = acquisition.registeredProviders.joinToString(",").ifBlank { "none" },
+    gpsInFlight = yesNo(acquisition.gpsInFlight),
+    lastGpsRequest = acquisition.lastGpsRequestReason?.let { reason ->
+        acquisition.lastGpsRequestAtMs?.let { "$reason ${formatUptime(it)}" } ?: reason
+    },
+    lastGpsResult = acquisition.lastGpsResult,
+    gpsRequests = acquisition.gpsRequestCount,
+    gpsFailures = acquisition.gpsFailureCount,
     tsnetState = if (tsnet.currentRunning) "Running" else "Stopped",
     tsnetStarts = tsnet.startCount,
     tsnetStops = tsnet.stopCount,
@@ -147,11 +153,11 @@ private fun publisherStateLabel(publishing: LocationDiagnosticsMonitor.Publishin
     else -> "Waiting"
 }
 
-/** Mode reflects the actual active interval: Disabled when sharing is off,
- *  Map active while the map requests the active cadence, else Background. */
-private fun publisherModeLabel(sharingEnabled: Boolean, intervalMs: Long, mapActiveIntervalMs: Long): String = when {
+/** Mode reflects the acquisition policy: Disabled when sharing is off,
+ *  Map active while the local map requests the active policy, else Background. */
+private fun publisherModeLabel(sharingEnabled: Boolean, modeName: String): String = when {
     !sharingEnabled -> "Disabled"
-    intervalMs == mapActiveIntervalMs -> "Map active"
+    modeName == org.hearthlane.location.PublisherMode.MAP_ACTIVE.name -> "Map active"
     else -> "Background"
 }
 
@@ -161,21 +167,10 @@ private fun intervalLabel(ms: Long): String = when {
     else -> "${ms / 1_000L} sec"
 }
 
-/** Classifies a read status name into a safe, human label. */
-fun classifyReadResult(statusName: String?): String? = when (statusName) {
-    null -> null
-    LocationReadStatus.SUCCESS.name -> "Success"
-    LocationReadStatus.NO_POSITION.name -> "Unavailable"
-    LocationReadStatus.NO_PERMISSION.name -> "Permission denied"
-    LocationReadStatus.LOCATION_DISABLED.name -> "Location disabled"
-    LocationReadStatus.TIMEOUT.name -> "Timeout"
-    else -> "Error"
-}
-
 /**
- * Classifies a raw publish outcome into a sanitized label. Network/HTTP/DNS
- * failures are collapsed so Diagnostics never leaks hostnames, paths or
- * payloads.
+ * Developer-oriented publish-decision label ("PUBLISH MOVEMENT"), or null when
+ * no decision was made yet. The reason name is the stable enum name used in
+ * the structured events.
  */
 fun classifyResult(raw: String?): String? = when {
     raw == null -> null

@@ -40,7 +40,7 @@ class LocationBootReceiver private constructor(
             context,
             LocationForegroundService.intent(
                 context,
-                LocationForegroundService.BACKGROUND_INTERVAL_MS,
+                PublisherMode.BACKGROUND,
             ),
         )
     }

@@ -3,6 +3,8 @@ package org.hearthlane.location
 import android.location.Location
 import android.os.SystemClock
 import org.hearthlane.core.relay.DeviceLocation
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -17,29 +19,25 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /**
- * Actor runner for the V2 [LocationPublisherMachine].
+ * Actor runner for the V2 [LocationPublisherMachine] (Phase 2 + Phase 3).
  *
  * One actor coroutine consumes [MachineCommand]s from a single channel; every
  * state mutation and every publish decision happens inside that coroutine, so
- * two concurrent state-machine publications can never reorder location state
- * (PUBLISH_NOW is a queued command, never a parallel coroutine).
+ * two concurrent state-machine publications can never reorder location state.
  *
- * Acquisition stays the current one-shot mechanism: the timer sends a [Tick]
- * every [checkIntervalMs]; on each tick the machine evaluates time-driven
- * decisions (backoff expiry, regular publish, presence) and then the runner
- * performs ONE [readLocation] and feeds the fix to the machine.
+ * Phase 3 acquisition: fixes arrive from the [AcquisitionController] via
+ * [submitFix] (listener callbacks and GPS one-shots); the machine Tick is a
+ * lightweight time-only scheduler (backoff expiry, presence, stale-pending
+ * cleanup) that NEVER reads a location. [tickInFlight] coalesces timer ticks
+ * so a long publish can never build a backlog; non-tick commands are never
+ * dropped.
  *
  * The machine's monotonic clock is [clockMs] (`elapsedRealtime`); wall clock
  * [wallClockMs] is only used for the human-readable Diagnostics timestamps.
- *
- * Every pipeline event is emitted through [emitEvent] (default: structured
- * logcat via [LocationEventLog]). No coordinate ever reaches an event.
  */
 internal class BackgroundLocationPublisher(
-    private val readLocation: suspend () -> LocationReadResult,
     private val publish: suspend (String, DeviceLocation) -> Int,
     private val deviceId: () -> String,
-    private val checkIntervalMs: () -> Long,
     private val scope: CoroutineScope,
     private val onPublishFailure: (() -> Unit)? = null,
     private val distanceMeters: (PositionFix, PositionFix) -> Double = ::geoDistanceMeters,
@@ -47,6 +45,9 @@ internal class BackgroundLocationPublisher(
     private val wallClockMs: () -> Long = System::currentTimeMillis,
     private val emitEvent: (LocationEvent) -> Unit = { LocationEventLog.emit(it) },
     private val mode: PublisherMode = PublisherMode.BACKGROUND,
+    private val tickIntervalMs: () -> Long = { TICK_INTERVAL_MS },
+    /** Test seam: invoked after every machine Tick step. */
+    private val onTickProcessed: (() -> Unit)? = null,
 ) {
 
     data class State(
@@ -60,10 +61,6 @@ internal class BackgroundLocationPublisher(
         val lastPublishAttemptAtMs: Long? = null,
         /** Sanitized publish outcome ("Success" or the raw error message). */
         val lastPublishResult: String? = null,
-        /** Last location read attempt (wall-clock ms). */
-        val lastReadAtMs: Long? = null,
-        /** [LocationReadStatus] name of the last read, or ERROR on exception. */
-        val lastReadResult: String? = null,
         /** Whether the machine currently holds a pending fix. */
         val hasPendingLocation: Boolean = false,
         /** Provider of the last fix received (observability only). */
@@ -92,14 +89,19 @@ internal class BackgroundLocationPublisher(
 
     private val machine = LocationPublisherMachine(distanceMeters)
     private val commands = Channel<MachineCommand>(Channel.UNLIMITED)
-    private var machineState = MachineState(mode = mode)
+
+    /** Written only by the actor; read by the acquisition controller. */
+    private val machineState = AtomicReference(MachineState(mode = mode))
+
+    /** Last emitted decision-event reason: identical SKIP decisions are deduped. */
+    private var lastEmittedDecisionName: String? = null
 
     /**
      * Timer-tick coalescing: while a Tick command is being processed, the
      * timer skips new fires, so a long publish can never build a backlog of
-     * queued acquisition cycles. Non-tick commands are never dropped.
+     * queued machine-time evaluations. Non-tick commands are never dropped.
      */
-    private val tickInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val tickInFlight = AtomicBoolean(false)
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
@@ -121,7 +123,7 @@ internal class BackgroundLocationPublisher(
         }
         timerJob = scope.launch {
             while (isActive) {
-                delay(checkIntervalMs())
+                delay(tickIntervalMs())
                 if (tickInFlight.compareAndSet(false, true)) {
                     commands.send(MachineCommand.Tick)
                 }
@@ -142,104 +144,85 @@ internal class BackgroundLocationPublisher(
         commands.trySend(MachineCommand.PublishNow)
     }
 
-    private suspend fun handle(command: MachineCommand) {
-        when (command) {
-            MachineCommand.Tick -> handleTick()
-            is MachineCommand.PublishNow,
-            is MachineCommand.NetworkRegained,
-            is MachineCommand.ModeChanged,
-            -> apply(machine.step(machineState, command, clockMs()))
-            is MachineCommand.Fix,
-            is MachineCommand.PublishResult,
-            -> error("command is produced internally: $command")
-        }
+    /** Mode change (map open/close): serialized policy switch, no restart. */
+    fun setMode(newMode: PublisherMode) {
+        commands.trySend(MachineCommand.ModeChanged(newMode))
     }
 
-    private suspend fun handleTick() {
-        // Acquisition FIRST, time-driven decisions SECOND: when a transport
-        // backoff expires in this cycle, the retry therefore evaluates the
-        // newest useful fix (read below) instead of the previous pending.
-        val now = clockMs()
-        val fix = try {
-            readLocation()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
-        }
+    /** ConnectivityManager-confirmed network regained / transport change. */
+    fun networkRegained() {
+        commands.trySend(MachineCommand.NetworkRegained)
+    }
+
+    /**
+     * Whether the machine currently holds a publishable (fresh) pending fix.
+     * Read by the acquisition controller for the GPS escalation policy.
+     */
+    fun hasPublishableFix(): Boolean {
+        val pending = machineState.get().pending ?: return false
+        return LocationPolicy.isFresh(pending.ageAt(clockMs()))
+    }
+
+    /**
+     * Feeds a freshly delivered fix (listener or GPS one-shot) into the
+     * machine. Observability is mirrored and the fix-received event emitted
+     * here; usefulness, pending and publishing stay with the machine.
+     */
+    fun submitFix(sample: LocationSample) {
         _state.update {
             it.copy(
-                lastReadAtMs = wallClockMs(),
-                lastReadResult = fix?.status?.name ?: LocationReadStatus.ERROR.name,
+                lastFixProvider = sample.provider,
+                lastFixAccuracyMeters = sample.accuracyMeters,
+                lastFixAgeMs = sample.ageMs,
             )
         }
-        val sample = fix?.sample
-        val fixDecision = if (sample != null) {
-            _state.update {
-                it.copy(
-                    lastFixProvider = sample.provider,
-                    lastFixAccuracyMeters = sample.accuracyMeters,
-                    lastFixAgeMs = sample.ageMs,
-                )
-            }
-            emitEvent(
-                LocationEvent(
-                    LocationEventLog.EVENT_FIX_RECEIVED,
-                    listOf(
-                        "provider" to sample.provider,
-                        "accuracyMeters" to sample.accuracyMeters,
-                        "ageMs" to sample.ageMs,
-                        "hasAccuracy" to sample.hasAccuracy,
-                    ),
+        emitEvent(
+            LocationEvent(
+                LocationEventLog.EVENT_FIX_RECEIVED,
+                listOf(
+                    "provider" to sample.provider,
+                    "accuracyMeters" to sample.accuracyMeters,
+                    "ageMs" to sample.ageMs,
+                    "hasAccuracy" to sample.hasAccuracy,
                 ),
-            )
-            apply(
-                machine.step(
-                    machineState,
-                    MachineCommand.Fix(
-                        PositionFix(
-                            latitude = sample.latitude,
-                            longitude = sample.longitude,
-                            accuracyMeters = sample.accuracyMeters,
-                            recordedAtEpochMs = sample.recordedAtWallClockMs,
-                            ageAtReadMs = sample.ageMs,
-                        ),
-                    ),
-                    clockMs(),
+            ),
+        )
+        commands.trySend(
+            MachineCommand.Fix(
+                PositionFix(
+                    latitude = sample.latitude,
+                    longitude = sample.longitude,
+                    accuracyMeters = sample.accuracyMeters,
+                    recordedAtEpochMs = sample.recordedAtWallClockMs,
+                    ageAtReadMs = sample.ageMs,
                 ),
-            )
-            machineState.lastDecision
-        } else {
-            emitEvent(
-                LocationEvent(
-                    LocationEventLog.EVENT_PUBLISH_DECISION,
-                    listOf(
-                        "decision" to "SKIP",
-                        "reason" to PublishDecisionReason.NO_PENDING.name,
-                        "sinceLastAttemptMs" to machineState.lastNetworkAttemptAtMs?.let { now - it },
-                        "sinceLastSuccessMs" to machineState.lastNetworkSuccessAtMs?.let { now - it },
-                    ),
-                ),
-            )
-            null
-        }
-        // Time-driven evaluation (backoff expiry retry, regular eligibility,
-        // presence). A SKIP decision with the same reason as the fix step's is
-        // a pure duplicate within one cycle and is suppressed.
-        apply(
-            machine.step(machineState, MachineCommand.Tick, clockMs()),
-            suppressDecisionReason = fixDecision,
+            ),
         )
     }
 
-    private suspend fun apply(
-        transition: MachineTransition,
-        suppressDecisionReason: PublishDecisionReason? = null,
-    ) {
-        val previous = machineState
-        machineState = transition.state
+    private suspend fun handle(command: MachineCommand) {
+        when (command) {
+            MachineCommand.Tick -> {
+                apply(machine.step(machineState.get(), MachineCommand.Tick, clockMs()))
+                onTickProcessed?.invoke()
+            }
+            // A fix-rejected event describes the processing of ONE fix: it is
+            // emitted only for transitions originated by a Fix command. Temporal
+            // Ticks never process fixes and must never re-emit it.
+            is MachineCommand.Fix -> apply(machine.step(machineState.get(), command, clockMs()), fromFix = true)
+            is MachineCommand.PublishNow,
+            is MachineCommand.NetworkRegained,
+            is MachineCommand.ModeChanged,
+            is MachineCommand.PublishResult,
+            -> apply(machine.step(machineState.get(), command, clockMs()))
+        }
+    }
+
+    private suspend fun apply(transition: MachineTransition, fromFix: Boolean = false) {
+        val previous = machineState.get()
+        machineState.set(transition.state)
         mirror()
-        emitDecisionEvents(previous, transition, suppressDecisionReason)
+        emitDecisionEvents(previous, transition, fromFix)
         for (action in transition.actions) {
             when (action) {
                 is MachineAction.PublishPosition -> executePositionPublish(action.pending)
@@ -251,33 +234,41 @@ internal class BackgroundLocationPublisher(
     private fun emitDecisionEvents(
         previous: MachineState,
         transition: MachineTransition,
-        suppressDecisionReason: PublishDecisionReason? = null,
+        fromFix: Boolean,
     ) {
         transition.decision?.let { decision ->
-            val suppressed = !decision.shouldPublish && decision.reason == suppressDecisionReason
-            if (decision.reason != PublishDecisionReason.NO_PENDING && !suppressed) {
-                emitEvent(
-                    LocationEvent(
-                        LocationEventLog.EVENT_PUBLISH_DECISION,
-                        listOf(
-                            "decision" to if (decision.shouldPublish) "PUBLISH" else "SKIP",
-                            "reason" to decision.reason.name,
-                            "distanceMeters" to decision.distanceMeters,
-                            "sinceLastAttemptMs" to decision.sinceLastAttemptMs,
-                            "sinceLastSuccessMs" to decision.sinceLastSuccessMs,
+            if (decision.reason != PublishDecisionReason.NO_PENDING) {
+                val duplicate = !decision.shouldPublish &&
+                    decision.reason.name == lastEmittedDecisionName
+                if (!duplicate) {
+                    lastEmittedDecisionName = decision.reason.name
+                    emitEvent(
+                        LocationEvent(
+                            LocationEventLog.EVENT_PUBLISH_DECISION,
+                            listOf(
+                                "decision" to if (decision.shouldPublish) "PUBLISH" else "SKIP",
+                                "reason" to decision.reason.name,
+                                "distanceMeters" to decision.distanceMeters,
+                                "sinceLastAttemptMs" to decision.sinceLastAttemptMs,
+                                "sinceLastSuccessMs" to decision.sinceLastSuccessMs,
+                            ),
                         ),
-                    ),
-                )
+                    )
+                }
             }
         }
-        transition.state.lastFixDecision?.let { fixDecision ->
-            if (fixDecision.name.startsWith("REJECTED_")) {
-                emitEvent(
-                    LocationEvent(
-                        LocationEventLog.EVENT_FIX_REJECTED,
-                        listOf("reason" to fixDecision.name),
-                    ),
-                )
+        // Exactly one fix-rejected event per rejected Fix command, never on
+        // later temporal Ticks (a rejection is a property of a processed fix).
+        if (fromFix) {
+            transition.state.lastFixDecision?.let { fixDecision ->
+                if (fixDecision.name.startsWith("REJECTED_")) {
+                    emitEvent(
+                        LocationEvent(
+                            LocationEventLog.EVENT_FIX_REJECTED,
+                            listOf("reason" to fixDecision.name),
+                        ),
+                    )
+                }
             }
         }
         if (previous.pending != transition.state.pending) {
@@ -340,7 +331,7 @@ internal class BackgroundLocationPublisher(
                 )
             }
         }
-        apply(machine.step(machineState, MachineCommand.PublishResult(outcome, PublishKind.POSITION), clockMs()))
+        apply(machine.step(machineState.get(), MachineCommand.PublishResult(outcome, PublishKind.POSITION), clockMs()))
     }
 
     private suspend fun executePresencePublish(position: PublishedPosition) {
@@ -367,11 +358,11 @@ internal class BackgroundLocationPublisher(
         } catch (e: Exception) {
             PublishOutcome.FAILURE
         }
-        apply(machine.step(machineState, MachineCommand.PublishResult(outcome, PublishKind.PRESENCE), clockMs()))
+        apply(machine.step(machineState.get(), MachineCommand.PublishResult(outcome, PublishKind.PRESENCE), clockMs()))
     }
 
     private fun mirror() {
-        val m = machineState
+        val m = machineState.get()
         val now = clockMs()
         _state.update {
             it.copy(
@@ -387,6 +378,11 @@ internal class BackgroundLocationPublisher(
                 lastPresenceDecision = m.lastPresenceDecision?.name,
             )
         }
+    }
+
+    companion object {
+        /** Machine time-evaluation cadence (no location reads). */
+        const val TICK_INTERVAL_MS = 30_000L
     }
 }
 

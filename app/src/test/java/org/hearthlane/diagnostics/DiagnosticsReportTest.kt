@@ -90,13 +90,9 @@ class DiagnosticsReportTest {
             foregroundService = "Running",
             publisherState = "Waiting",
             publisherMode = "Background",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = "16:57:12",
-            lastReadResult = "Success",
             lastPublishAttempt = "16:57:13",
             lastPublishResult = "Success",
             lastSuccessfulPublish = "16:57:13",
@@ -115,12 +111,9 @@ class DiagnosticsReportTest {
         assertTrue(report.contains("Foreground service: Running"))
         assertTrue(report.contains("Publisher state: Waiting"))
         assertTrue(report.contains("Publisher mode: Background"))
-        assertTrue(report.contains("Location check interval: 1 min"))
         assertTrue(report.contains("Minimum publish interval: 30 sec"))
         assertTrue(report.contains("Movement threshold: 100 m"))
         assertTrue(report.contains("Presence interval: 15 min"))
-        assertTrue(report.contains("Map-active interval: 30 sec"))
-        assertTrue(report.contains("Last location read: 16:57:12 (Success)"))
         assertTrue(report.contains("Last publish attempt: 16:57:13"))
         assertTrue(report.contains("Last publish result: Success"))
         assertTrue(report.contains("Last successful publish: 16:57:13"))
@@ -140,13 +133,9 @@ class DiagnosticsReportTest {
             foregroundService = "Stopped",
             publisherState = "Idle",
             publisherMode = "Disabled",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = null,
-            lastReadResult = null,
             lastPublishAttempt = null,
             lastPublishResult = null,
             lastSuccessfulPublish = null,
@@ -157,7 +146,6 @@ class DiagnosticsReportTest {
         )
         val report = DiagnosticsReport.build(snapshot.copy(location = location))
 
-        assertTrue(report.contains("Last location read: Never"))
         assertTrue(report.contains("Last publish attempt: Never"))
         assertTrue(report.contains("Last successful publish: Never"))
         assertTrue(report.contains("Publisher mode: Disabled"))
@@ -173,13 +161,9 @@ class DiagnosticsReportTest {
             foregroundService = "Running",
             publisherState = "Error",
             publisherMode = "Background",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = "16:57:12",
-            lastReadResult = "Success",
             lastPublishAttempt = "16:57:13",
             lastPublishResult = "HTTP 5xx",
             lastSuccessfulPublish = null,
@@ -207,13 +191,9 @@ class DiagnosticsReportTest {
             foregroundService = "Running",
             publisherState = "Waiting",
             publisherMode = "Background",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = "16:57:12",
-            lastReadResult = "Success",
             lastPublishAttempt = "16:57:13",
             lastPublishResult = "Success",
             lastSuccessfulPublish = "16:57:13",
@@ -264,13 +244,9 @@ class DiagnosticsReportTest {
             foregroundService = "Running",
             publisherState = "Waiting",
             publisherMode = "Background",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = "16:57:12",
-            lastReadResult = "Success",
             lastPublishAttempt = "16:57:13",
             lastPublishResult = "Success",
             lastSuccessfulPublish = "16:57:13",
@@ -305,13 +281,9 @@ class DiagnosticsReportTest {
             foregroundService = "Running",
             publisherState = "Waiting",
             publisherMode = "Background",
-            locationCheckIntervalLabel = "1 min",
             minPublishIntervalLabel = "30 sec",
             movementThresholdLabel = "100 m",
             presenceIntervalLabel = "15 min",
-            mapActiveIntervalLabel = "30 sec",
-            lastRead = null,
-            lastReadResult = null,
             lastPublishAttempt = null,
             lastPublishResult = null,
             lastSuccessfulPublish = null,
@@ -333,6 +305,42 @@ class DiagnosticsReportTest {
         assertTrue(report.contains("Last presence decision: n/a"))
         assertTrue(report.contains("Location tsnet last start at: Never"))
         assertTrue(report.contains("Location tsnet last stop at: Never"))
+    }
+
+    @Test
+    fun `location report renders acquisition fields`() {
+        val location = LocationDiagnosticsSnapshot(
+            sharingEnabled = "Yes",
+            foregroundPermission = "Granted",
+            backgroundPermission = "Granted",
+            locationServices = "Enabled",
+            foregroundService = "Running",
+            publisherState = "Waiting",
+            publisherMode = "Map active",
+            minPublishIntervalLabel = "30 sec",
+            movementThresholdLabel = "100 m",
+            presenceIntervalLabel = "15 min",
+            lastPublishAttempt = "16:57:13",
+            lastPublishResult = "Success",
+            lastSuccessfulPublish = "16:57:13",
+            pendingLocation = "No",
+            relay = "Reachable",
+            deviceId = "hearthlane-ab12cd34",
+            deviceNickname = "Meu celular",
+            acquisitionProviders = "network,passive",
+            gpsInFlight = "Yes",
+            lastGpsRequest = "POOR_ACCURACY 1h02m03s",
+            lastGpsResult = "SUCCESS",
+            gpsRequests = 4,
+            gpsFailures = 1,
+        )
+        val report = DiagnosticsReport.build(snapshot.copy(location = location))
+
+        assertTrue(report.contains("Acquisition providers: network,passive"))
+        assertTrue(report.contains("GPS in flight: Yes"))
+        assertTrue(report.contains("Last GPS request: POOR_ACCURACY 1h02m03s"))
+        assertTrue(report.contains("Last GPS result: SUCCESS"))
+        assertTrue(report.contains("GPS requests: 4, failures: 1"))
     }
 
     @Test

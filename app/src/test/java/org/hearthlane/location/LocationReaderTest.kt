@@ -19,12 +19,10 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
- * Robolectric shadow-level tests for [LocationReader].
- *
- * What these cover: the permission gate, the "location disabled / no enabled
- * provider" outcomes, the last-known read path, the API 30+ getCurrentLocation
- * path (the shadow delivers a fresh last-known synchronously) and the
- * API 26-29 single-update timeout path.
+ * Robolectric shadow-level tests for [LocationReader] one-shot reads: the
+ * permission gate, the provider-disabled outcome, the API 30+ getCurrentLocation
+ * path (the shadow delivers a fresh last-known synchronously) and the API 26-29
+ * single-update timeout path.
  *
  * What they do NOT cover (physical-device only): real GPS/network fix quality,
  * real acquisition latency, battery cost, OEM behaviour.
@@ -45,20 +43,12 @@ class LocationReaderTest {
         shadowOf(app).grantPermissions(Manifest.permission.ACCESS_COARSE_LOCATION)
     }
 
-    private fun disableAllProviders() {
+    private fun disableNetworkProvider() {
         shadow.setProviderEnabled(LocationManager.NETWORK_PROVIDER, false)
-        shadow.setProviderEnabled(LocationManager.GPS_PROVIDER, false)
-        shadow.setProviderEnabled(LocationManager.PASSIVE_PROVIDER, false)
     }
 
     private fun enableNetworkOnly() {
-        disableAllProviders()
         shadow.setProviderEnabled(LocationManager.NETWORK_PROVIDER, true)
-    }
-
-    /** Turns the system location master switch off. */
-    private fun disableSystemLocation() {
-        shadow.setLocationEnabled(false)
     }
 
     private fun newNetworkLocation(
@@ -77,61 +67,17 @@ class LocationReaderTest {
     private fun reader() = LocationReader(context, locationManager)
 
     @Test
-    fun `readLastKnown without permission returns NO_PERMISSION`() = runTest {
-        val result = reader().readLastKnown()
-        assertEquals(LocationReadStatus.NO_PERMISSION, result.status)
-    }
-
-    @Test
     fun `readCurrent without permission returns NO_PERMISSION`() = runTest {
-        val result = reader().readCurrent()
+        val result = reader().readCurrent(LocationManager.NETWORK_PROVIDER, timeoutMs = 500)
         assertEquals(LocationReadStatus.NO_PERMISSION, result.status)
     }
 
     @Test
-    fun `readLastKnown with permission but location disabled returns LOCATION_DISABLED`() = runTest {
+    fun `readCurrent with a disabled provider returns LOCATION_DISABLED`() = runTest {
         grantCoarsePermission()
-        disableSystemLocation()
-        val result = reader().readLastKnown()
+        disableNetworkProvider()
+        val result = reader().readCurrent(LocationManager.NETWORK_PROVIDER, timeoutMs = 500)
         assertEquals(LocationReadStatus.LOCATION_DISABLED, result.status)
-    }
-
-    @Test
-    fun `readCurrent with permission but location disabled returns LOCATION_DISABLED`() = runTest {
-        grantCoarsePermission()
-        disableSystemLocation()
-        val result = reader().readCurrent()
-        assertEquals(LocationReadStatus.LOCATION_DISABLED, result.status)
-    }
-
-    @Test
-    fun `readLastKnown with location on but no stored fix returns NO_POSITION`() = runTest {
-        grantCoarsePermission()
-        enableNetworkOnly()
-        val result = reader().readLastKnown()
-        assertEquals(LocationReadStatus.NO_POSITION, result.status)
-    }
-
-    @Test
-    fun `readLastKnown returns the enabled provider's fix with its age`() = runTest {
-        grantCoarsePermission()
-        enableNetworkOnly()
-        val location = newNetworkLocation()
-        shadow.setLastKnownLocation(LocationManager.NETWORK_PROVIDER, location)
-
-        val result = reader().readLastKnown()
-
-        assertEquals(LocationReadStatus.SUCCESS, result.status)
-        val sample = result.sample
-        assertNotNull(sample)
-        assertEquals(LocationManager.NETWORK_PROVIDER, sample!!.provider)
-        assertEquals(-23.5505, sample.latitude, 0.0)
-        assertEquals(40f, sample.accuracyMeters)
-        assertTrue(sample.hasAccuracy)
-        assertTrue(sample.fromLastKnown)
-        assertEquals(0L, sample.acquisitionMs)
-        // The fix was recorded ~1s in the past; its measured age must be ~1s.
-        assertTrue(sample.ageMs in 500..2_000)
     }
 
     @Test
@@ -143,13 +89,18 @@ class LocationReaderTest {
             newNetworkLocation(),
         )
 
-        val result = reader().readCurrent()
+        val result = reader().readCurrent(LocationManager.NETWORK_PROVIDER, timeoutMs = 1_000)
 
         assertEquals(LocationReadStatus.SUCCESS, result.status)
         val sample = result.sample
         assertNotNull(sample)
         assertFalse(sample!!.fromLastKnown)
         assertEquals(LocationManager.NETWORK_PROVIDER, sample.provider)
+        assertEquals(-23.5505, sample.latitude, 0.0)
+        assertEquals(40f, sample.accuracyMeters)
+        assertTrue(sample.hasAccuracy)
+        // The fix was recorded ~1s in the past; its measured age must be ~1s.
+        assertTrue(sample.ageMs in 500..2_000)
     }
 
     @Test
@@ -157,7 +108,7 @@ class LocationReaderTest {
         grantCoarsePermission()
         enableNetworkOnly()
 
-        val result = reader().readCurrent(timeoutMs = 500)
+        val result = reader().readCurrent(LocationManager.NETWORK_PROVIDER, timeoutMs = 500)
 
         assertEquals(LocationReadStatus.TIMEOUT, result.status)
     }
@@ -168,7 +119,7 @@ class LocationReaderTest {
         grantCoarsePermission()
         enableNetworkOnly()
 
-        val result = reader().readCurrent(timeoutMs = 500)
+        val result = reader().readCurrent(LocationManager.NETWORK_PROVIDER, timeoutMs = 500)
 
         assertEquals(LocationReadStatus.TIMEOUT, result.status)
     }

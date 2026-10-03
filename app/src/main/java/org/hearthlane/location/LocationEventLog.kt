@@ -30,6 +30,19 @@ object LocationEventLog {
     const val EVENT_PUBLISH_FAILURE = "publish-failure"
     const val EVENT_BACKOFF = "backoff"
 
+    // Acquisition events (Phase 3).
+    const val EVENT_ACQUISITION_START = "acquisition-start"
+    const val EVENT_ACQUISITION_STOP = "acquisition-stop"
+    const val EVENT_PROVIDER_REGISTERED = "provider-registered"
+    const val EVENT_PROVIDER_REGISTRATION_FAILED = "provider-registration-failed"
+    const val EVENT_PROVIDER_DISABLED = "provider-disabled"
+    const val EVENT_GPS_REQUEST = "gps-request"
+    const val EVENT_GPS_RESULT = "gps-result"
+    const val EVENT_GPS_TIMEOUT = "gps-timeout"
+    const val EVENT_GPS_SKIPPED = "gps-skipped"
+    const val EVENT_MODE_CHANGED = "mode-changed"
+    const val EVENT_NETWORK_REGAINED = "network-regained"
+
     /** Emits [event] through logcat with the shared tag. */
     fun emit(event: LocationEvent) {
         Log.i(TAG, format(event))

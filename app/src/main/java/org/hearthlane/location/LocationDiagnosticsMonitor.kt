@@ -26,9 +26,8 @@ object LocationDiagnosticsMonitor {
     data class PublishingState(
         val serviceRunning: Boolean = false,
         val publisherRunning: Boolean = false,
-        val intervalMs: Long = LocationForegroundService.BACKGROUND_INTERVAL_MS,
-        val lastReadAtMs: Long? = null,
-        val lastReadResult: String? = null,
+        /** [PublisherMode] name ("BACKGROUND"/"MAP_ACTIVE"). */
+        val mode: String = PublisherMode.BACKGROUND.name,
         val lastPublishAttemptAtMs: Long? = null,
         val lastPublishResult: String? = null,
         val lastPublishAtMs: Long? = null,
@@ -51,8 +50,8 @@ object LocationDiagnosticsMonitor {
     val state: StateFlow<PublishingState> = _state.asStateFlow()
 
     /** Called by the service whenever it starts a command (idempotent). */
-    internal fun onServiceStarted(intervalMs: Long) {
-        _state.update { it.copy(serviceRunning = true, intervalMs = intervalMs) }
+    internal fun onServiceStarted(mode: PublisherMode) {
+        _state.update { it.copy(serviceRunning = true, mode = mode.name) }
     }
 
     /** Called by the service on destroy. */
@@ -65,8 +64,6 @@ object LocationDiagnosticsMonitor {
         _state.update {
             it.copy(
                 publisherRunning = publisher.running,
-                lastReadAtMs = publisher.lastReadAtMs,
-                lastReadResult = publisher.lastReadResult,
                 lastPublishAttemptAtMs = publisher.lastPublishAttemptAtMs,
                 lastPublishResult = publisher.lastPublishResult,
                 lastPublishAtMs = publisher.lastPublishAtMs,

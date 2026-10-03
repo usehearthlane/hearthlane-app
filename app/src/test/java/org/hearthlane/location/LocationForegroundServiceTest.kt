@@ -79,7 +79,7 @@ class LocationForegroundServiceTest {
         val service = Robolectric
             .buildService(
                 LocationForegroundService::class.java,
-                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+                LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
             )
             .create()
 
@@ -99,7 +99,7 @@ class LocationForegroundServiceTest {
         val service = Robolectric
             .buildService(
                 LocationForegroundService::class.java,
-                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+                LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
             )
             .create()
 
@@ -117,7 +117,7 @@ class LocationForegroundServiceTest {
         val service = Robolectric
             .buildService(
                 LocationForegroundService::class.java,
-                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS).apply {
+                LocationForegroundService.intent(context, PublisherMode.BACKGROUND).apply {
                     action = LocationForegroundService.ACTION_PUBLISH_NOW
                 },
             )
@@ -132,15 +132,19 @@ class LocationForegroundServiceTest {
     }
 
     @Test
-    fun `acquisition and v2 policy constants keep the expected cadences`() {
-        assertEquals(60_000L, LocationForegroundService.BACKGROUND_INTERVAL_MS)
-        assertEquals(30_000L, LocationForegroundService.ACTIVE_INTERVAL_MS)
+    fun `policy constants keep the v2 cadences`() {
         assertEquals(30_000L, LocationPolicy.MIN_PUBLISH_INTERVAL_MS)
         assertEquals(3 * 60_000L, LocationPolicy.MAX_FIX_AGE_FOR_PUBLISH_MS)
         assertEquals(100.0, LocationPolicy.DISTANCE_THRESHOLD_METERS, 0.0)
         assertEquals(50.0, LocationPolicy.MAP_ACTIVE_DISTANCE_THRESHOLD_METERS, 0.0)
         assertEquals(15 * 60_000L, LocationPolicy.PRESENCE_INTERVAL_MS)
         assertEquals(60_000L, LocationPolicy.BACKOFF_FLOOR_MS)
+        assertEquals(30_000L, AcquisitionPolicy.NETWORK_MIN_TIME_MS)
+        assertEquals(100.0, AcquisitionPolicy.NETWORK_MIN_DISTANCE_METERS, 0.0)
+        assertEquals(20_000L, AcquisitionPolicy.GPS_TIMEOUT_MS)
+        assertEquals(60_000L, AcquisitionPolicy.GPS_MIN_INTERVAL_MS)
+        assertEquals(150f, AcquisitionPolicy.GPS_ACCURACY_TRIGGER_METERS)
+        assertEquals(30_000L, BackgroundLocationPublisher.TICK_INTERVAL_MS)
     }
 
     @Test
@@ -149,7 +153,7 @@ class LocationForegroundServiceTest {
         val service = Robolectric
             .buildService(
                 LocationForegroundService::class.java,
-                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+                LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
             )
             .create()
 
@@ -163,33 +167,36 @@ class LocationForegroundServiceTest {
         service.destroy()
     }
 
-    @Test
-    fun `interval switches rebuild the session without orphaning the gateway`() {
+@Test
+    fun `mode switches change policy without rebuilding the publisher`() {
         setSharingEnabled(true)
         val service = Robolectric
             .buildService(
                 LocationForegroundService::class.java,
-                LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+                LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
             )
             .create()
 
         service.startCommand(0, 1)
         awaitReady { service.get().publisherWired }
+        val builds = service.get().publisherBuildCount
+        assertTrue("the publisher was built once", builds >= 1)
 
-        // Each interval switch runs restartLoop: the old gateway/session must be
-        // released before the new one is built, so no tsnet node is left
-        // Running without an owner between rebuilds.
+        // Map open / close: mode switches must NOT restart the service or
+        // rebuild the publisher (the acquisition policy switches in place).
         service.withIntent(
-            LocationForegroundService.intent(context, LocationForegroundService.ACTIVE_INTERVAL_MS),
+            LocationForegroundService.intent(context, PublisherMode.MAP_ACTIVE),
         )
         service.startCommand(0, 2)
         awaitReady { service.get().publisherWired }
+        assertEquals("map-open must not rebuild the publisher", builds, service.get().publisherBuildCount)
 
         service.withIntent(
-            LocationForegroundService.intent(context, LocationForegroundService.BACKGROUND_INTERVAL_MS),
+            LocationForegroundService.intent(context, PublisherMode.BACKGROUND),
         )
         service.startCommand(0, 3)
         awaitReady { service.get().publisherWired }
+        assertEquals("map-close must not rebuild the publisher", builds, service.get().publisherBuildCount)
 
         service.destroy()
         service.destroy()

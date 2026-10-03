@@ -8,9 +8,12 @@ import android.content.Context
 import android.content.Intent
 import android.location.LocationManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import org.hearthlane.BuildConfig
 import org.hearthlane.R
 import org.hearthlane.core.connectivity.TsnetGateway
@@ -25,7 +28,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Foreground service (type `location`) that keeps publishing the device's
@@ -33,10 +35,11 @@ import java.util.concurrent.atomic.AtomicLong
  * and even when the app is closed. It is the background publishing mechanism
  * for the location capability (Phase 9.3).
  *
- * Responsibilities: one [BackgroundLocationPublisher] loop (read fix ->
- * publish -> wait), an interval that can be switched (background 5 min vs
- * map-active 30 s), an on-demand publish action, and a persistent (silent)
- * notification required by Android for any foreground service.
+ * Phase 3 acquisition: the service owns one [AcquisitionController]
+ * (NETWORK + PASSIVE listeners, GPS on demand) feeding the pure
+ * [BackgroundLocationPublisher] machine. Mode changes (map open/close) switch
+ * the policy in place — the service, the publisher and the listeners are
+ * never restarted for a mode change.
  *
  * Platform constraints (documented in the Phase 9.2 spike, PHYSICAL
  * VALIDATION PENDING): Android 14+ forbids starting a location FGS from the
@@ -52,12 +55,13 @@ import java.util.concurrent.atomic.AtomicLong
 class LocationForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val intervalMs = AtomicLong(BACKGROUND_INTERVAL_MS)
     private var publisher: BackgroundLocationPublisher? = null
+    private var acquisition: AcquisitionController? = null
     private var loopJob: Job? = null
     private var stateJob: Job? = null
     private var wiringJob: Job? = null
     private var appSettings: AppSettings? = null
+    private var currentMode: PublisherMode = PublisherMode.BACKGROUND
     @Volatile
     private var locationGateway: TsnetGateway? = null
     @Volatile
@@ -68,14 +72,26 @@ class LocationForegroundService : Service() {
     internal var publisherWired: Boolean = false
         private set
 
+    /** Test seam: how many times the publisher was (re)built. */
+    @Volatile
+    internal var publisherBuildCount: Int = 0
+        private set
+
     /** Test seam: true when the service stopped itself because sharing is off. */
     @Volatile
     internal var stoppedByOptOut: Boolean = false
         private set
 
+    private val connectivityManager: ConnectivityManager?
+        get() = getSystemService(ConnectivityManager::class.java)
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastTransport: String? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        registerNetworkCallback()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,20 +103,16 @@ class LocationForegroundService : Service() {
             }
             ACTION_PUBLISH_NOW -> {
                 ensurePublisher()
-                loopJob?.let { publisher?.let { p -> p.publishNow() } }
+                publisher?.publishNow()
             }
             else -> {
-                val requested = intent?.getLongExtra(EXTRA_INTERVAL_MS, 0L)?.takeIf { it > 0 }
-                if (requested != null && requested != intervalMs.get()) {
-                    // Interval switch (map open/close): restart the loop so the
-                    // new cadence takes effect immediately, starting with one
-                    // immediate publish.
-                    intervalMs.set(requested)
-                    restartLoop()
-                } else if (requested != null) {
-                    intervalMs.set(requested)
+                val requestedMode = intent?.getSerializableExtra(EXTRA_MODE) as? PublisherMode
+                if (requestedMode != null && requestedMode != currentMode) {
+                    currentMode = requestedMode
+                    publisher?.setMode(requestedMode)
+                    acquisition?.onModeChanged(requestedMode)
                 }
-                LocationDiagnosticsMonitor.onServiceStarted(intervalMs.get())
+                LocationDiagnosticsMonitor.onServiceStarted(currentMode)
                 ensurePublisher()
             }
         }
@@ -109,8 +121,8 @@ class LocationForegroundService : Service() {
 
     /**
      * Wires the publisher once settings are available. The wiring is
-     * idempotent: if a restart (interval switch) already rebuilt the loop, the
-     * pending wiring job finds [publisher] non-null and does nothing.
+     * idempotent: a restart never re-enters this path with an existing
+     * publisher.
      */
     private fun ensurePublisher() {
         if (publisher != null) return
@@ -137,6 +149,7 @@ class LocationForegroundService : Service() {
         relaySubdomain = BuildConfig.HEARTHLANE_RELAY_SUBDOMAIN,
     ).also { it.ready.first { ready -> ready } }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private fun buildPublisher(settings: AppSettings) {
         if (publisher != null) return
         val locationManager = applicationContext.getSystemService(LocationManager::class.java)
@@ -148,8 +161,6 @@ class LocationForegroundService : Service() {
             connectTimeoutMs = RelayConfig("", "").tailscaleConnectTimeoutMs,
         )
         locationGateway = gateway
-        val connectivityManager =
-            applicationContext.getSystemService(ConnectivityManager::class.java)
         val session = RelayPublishSession(
             gateway = gateway,
             config = {
@@ -161,20 +172,36 @@ class LocationForegroundService : Service() {
             networkType = { connectivityManager?.let(::networkTypeLabel) },
         )
         val p = BackgroundLocationPublisher(
-            readLocation = { reader.readCurrent(LOCATION_TIMEOUT_MS) },
             publish = session::publish,
             deviceId = { AppSettings.nodeHostname(settings.nodeSuffix.value) },
-            checkIntervalMs = { intervalMs.get() },
             scope = serviceScope,
             onPublishFailure = session::invalidate,
-            mode = if (intervalMs.get() == ACTIVE_INTERVAL_MS) {
-                PublisherMode.MAP_ACTIVE
-            } else {
-                PublisherMode.BACKGROUND
-            },
+            mode = currentMode,
         )
         publisher = p
+        publisherBuildCount++
+        val a = AcquisitionController(
+            policy = AcquisitionPolicy(::geoDistanceMetersObserved),
+            scope = serviceScope,
+            hasFinePermission = { hasFineLocationPermission() },
+            hasPublishableFix = { p.hasPublishableFix() },
+            isProviderEnabled = { locationManager.isProviderEnabled(it) },
+            registerUpdates = { provider, minTimeMs, minDistanceMeters, listener ->
+                locationManager.requestLocationUpdates(
+                    provider,
+                    minTimeMs,
+                    minDistanceMeters,
+                    listener,
+                    android.os.Looper.getMainLooper(),
+                )
+            },
+            unregisterUpdates = { listener -> locationManager.removeUpdates(listener) },
+            requestCurrent = { provider, timeoutMs -> reader.readCurrent(provider, timeoutMs) },
+            onFix = { sample -> p.submitFix(sample) },
+        )
+        acquisition = a
         loopJob = serviceScope.launch { p.start() }
+        serviceScope.launch { a.start() }
         // Mirror the publisher's sanitized metadata into the shared monitor for
         // Diagnostics (timestamps/states only, never coordinates or payload).
         stateJob = serviceScope.launch {
@@ -182,24 +209,13 @@ class LocationForegroundService : Service() {
         }
     }
 
-    private fun restartLoop() {
-        publisher?.stop()
-        publisher = null
-        loopJob?.cancel()
-        loopJob = null
-        stateJob?.cancel()
-        stateJob = null
-        // Release the previous gateway's claim before the new session replaces
-        // it, so a stale session can never leave the node Running without an
-        // owner (converges to STOPPED when nothing else uses it).
-        releaseLocationGateway()
-        ensurePublisher()
-    }
-
     override fun onDestroy() {
         destroyed = true
+        unregisterNetworkCallback()
         publisher?.stop()
         publisher = null
+        acquisition?.stop()
+        acquisition = null
         loopJob?.cancel()
         loopJob = null
         stateJob?.cancel()
@@ -228,6 +244,79 @@ class LocationForegroundService : Service() {
         }
     }
 
+    /**
+     * Conservative connectivity restoration signal for the machine's
+     * [MachineCommand.NetworkRegained] reset: only a real regain (onAvailable
+     * after onLost) or a real transport change (WIFI <-> CELLULAR) counts;
+     * noisy repeated capabilities callbacks never reset.
+     */
+    private fun registerNetworkCallback() {
+        val manager = connectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            private var wasLost = false
+
+            override fun onLost(network: Network) {
+                wasLost = true
+            }
+
+            override fun onAvailable(network: Network) {
+                val regained = wasLost
+                wasLost = false
+                if (regained) {
+                    emitNetworkRegained()
+                }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                val transport = transportLabel(capabilities)
+                if (transport != null && transport != lastTransport) {
+                    val changed = lastTransport != null
+                    lastTransport = transport
+                    if (changed) {
+                        emitNetworkRegained()
+                    }
+                }
+            }
+        }
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+        networkCallback = callback
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback
+        networkCallback = null
+        if (callback != null) {
+            runCatching { connectivityManager?.unregisterNetworkCallback(callback) }
+        }
+    }
+
+    private fun emitNetworkRegained() {
+        LocationEventLog.emit(
+            LocationEvent(
+                LocationEventLog.EVENT_NETWORK_REGAINED,
+                listOf("transport" to lastTransport),
+            ),
+        )
+        publisher?.networkRegained()
+    }
+
+    /** Maps the active network to a coarse label ("WIFI"/"CELLULAR"/"OTHER")
+     *  for diagnostics only; never exposes addresses. Null when unknown. */
+    private fun networkTypeLabel(connectivityManager: ConnectivityManager): String? =
+        connectivityManager.activeNetwork
+            ?.let { runCatching { connectivityManager.getNetworkCapabilities(it) }.getOrNull() }
+            ?.let(::transportLabel)
+
+    private fun transportLabel(capabilities: NetworkCapabilities): String = when {
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+        else -> "OTHER"
+    }
+
+    private fun hasFineLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotificationChannel() {
@@ -252,42 +341,25 @@ class LocationForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-    /** Maps the active network to a coarse label ("WIFI"/"CELLULAR"/"OTHER")
-     *  for diagnostics only; never exposes addresses. Null when unknown. */
-    private fun networkTypeLabel(connectivityManager: ConnectivityManager): String? {
-        val network = runCatching { connectivityManager.activeNetwork }.getOrNull() ?: return null
-        val caps = runCatching { connectivityManager.getNetworkCapabilities(network) }.getOrNull()
-            ?: return null
-        return when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-            else -> "OTHER"
-        }
-    }
-
     companion object {
         const val ACTION_START = "org.hearthlane.location.START"
         const val ACTION_STOP = "org.hearthlane.location.STOP"
         const val ACTION_PUBLISH_NOW = "org.hearthlane.location.PUBLISH_NOW"
-        const val EXTRA_INTERVAL_MS = "interval_ms"
-
-        /** Location-read cadence in background (publishing is adaptive, not per cycle). */
-        const val BACKGROUND_INTERVAL_MS = 60_000L
-        /** Location-read cadence while the map is open (map-active). */
-        const val ACTIVE_INTERVAL_MS = 30_000L
-
-        /** Maximum time for a single one-shot location read. */
-        const val LOCATION_TIMEOUT_MS = 10_000L
-
-        // The V2 adaptive publish policy (freshness, accuracy, movement,
-        // backoff, presence) lives in LocationPolicy; acquisition stays here.
+        const val EXTRA_MODE = "mode"
 
         private const val CHANNEL_ID = "location"
         private const val NOTIFICATION_ID = 42
 
-        fun intent(context: Context, intervalMs: Long): Intent =
+        internal fun intent(context: Context, mode: PublisherMode): Intent =
             Intent(context, LocationForegroundService::class.java)
                 .setAction(ACTION_START)
-                .putExtra(EXTRA_INTERVAL_MS, intervalMs)
+                .putExtra(EXTRA_MODE, mode)
     }
+}
+
+/** Great-circle distance for the acquisition policy (Android seam). */
+private fun geoDistanceMetersObserved(a: FixObserved, b: FixObserved): Double {
+    val results = FloatArray(1)
+    android.location.Location.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude, results)
+    return kotlin.math.abs(results[0].toDouble())
 }

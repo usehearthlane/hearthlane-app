@@ -2,11 +2,13 @@ package org.hearthlane.diagnostics
 
 import org.hearthlane.core.relay.RelayConnection
 import org.hearthlane.core.relay.RelayTransportKind
+import org.hearthlane.location.AcquisitionDiagnosticsMonitor
 import org.hearthlane.location.FixDecisionReason
 import org.hearthlane.location.LocationDiagnosticsMonitor
 import org.hearthlane.location.LocationPermissionSnapshot
 import org.hearthlane.location.LocationReadStatus
 import org.hearthlane.location.PublishDecisionReason
+import org.hearthlane.location.PublisherMode
 import org.hearthlane.location.TsnetLifecycleMonitor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -30,9 +32,7 @@ class LocationDiagnosticsTest {
         locationEnabled: Boolean = true,
         serviceRunning: Boolean = true,
         publisherRunning: Boolean = true,
-        intervalMs: Long = 5 * 60_000L,
-        lastReadAtMs: Long? = null,
-        lastReadResult: String? = null,
+        mode: String = PublisherMode.BACKGROUND.name,
         lastPublishAttemptAtMs: Long? = null,
         lastPublishResult: String? = null,
         lastPublishAtMs: Long? = null,
@@ -48,6 +48,7 @@ class LocationDiagnosticsTest {
         presenceCount: Int = 0,
         lastPresenceAtMs: Long? = null,
         lastPresenceDecision: String? = null,
+        acquisition: AcquisitionDiagnosticsMonitor.State = AcquisitionDiagnosticsMonitor.State(),
         tsnet: TsnetLifecycleMonitor.State = TsnetLifecycleMonitor.State(),
         relay: RelayConnection? = RelayConnection.Connected(RelayTransportKind.LOCAL),
         deviceId: String = "hearthlane-ab12cd34",
@@ -59,9 +60,7 @@ class LocationDiagnosticsTest {
         publishing = LocationDiagnosticsMonitor.PublishingState(
             serviceRunning = serviceRunning,
             publisherRunning = publisherRunning,
-            intervalMs = intervalMs,
-            lastReadAtMs = lastReadAtMs,
-            lastReadResult = lastReadResult,
+            mode = mode,
             lastPublishAttemptAtMs = lastPublishAttemptAtMs,
             lastPublishResult = lastPublishResult,
             lastPublishAtMs = lastPublishAtMs,
@@ -82,11 +81,10 @@ class LocationDiagnosticsTest {
         deviceId = deviceId,
         deviceNickname = nickname,
         tsnet = tsnet,
-        locationCheckIntervalMs = 60_000L,
+        acquisition = acquisition,
         minPublishIntervalMs = 30_000L,
         distanceThresholdMeters = 100.0,
         presenceIntervalMs = 15 * 60_000L,
-        mapActiveIntervalMs = 30_000L,
     )
 
     @Test
@@ -96,7 +94,7 @@ class LocationDiagnosticsTest {
 
     @Test
     fun `sharing disabled is reported as No with mode disabled`() {
-        val result = snapshot(sharing = false, intervalMs = 30_000L)
+        val result = snapshot(sharing = false, mode = PublisherMode.MAP_ACTIVE.name)
 
         assertEquals("No", result.sharingEnabled)
         assertEquals("Disabled", result.publisherMode)
@@ -157,37 +155,28 @@ class LocationDiagnosticsTest {
     }
 
     @Test
-    fun `publisher mode background with the background interval`() {
-        assertEquals("Background", snapshot(intervalMs = 5 * 60_000L).publisherMode)
-    }
-
-    @Test
-    fun `publisher mode map active with the active interval`() {
-        assertEquals("Map active", snapshot(intervalMs = 30_000L).publisherMode)
+    fun `publisher mode background and map active are reported from the mode`() {
+        assertEquals("Background", snapshot(mode = PublisherMode.BACKGROUND.name).publisherMode)
+        assertEquals("Map active", snapshot(mode = PublisherMode.MAP_ACTIVE.name).publisherMode)
     }
 
     @Test
     fun `adaptive policy values are read from the real configured values`() {
         val result = snapshot()
 
-        assertEquals("1 min", result.locationCheckIntervalLabel)
         assertEquals("30 sec", result.minPublishIntervalLabel)
         assertEquals("100 m", result.movementThresholdLabel)
         assertEquals("15 min", result.presenceIntervalLabel)
-        assertEquals("30 sec", result.mapActiveIntervalLabel)
     }
 
     @Test
     fun `never published leaves timestamps null`() {
         val result = snapshot(
-            lastReadAtMs = null,
-            lastReadResult = null,
             lastPublishAttemptAtMs = null,
             lastPublishResult = null,
             lastPublishAtMs = null,
         )
 
-        assertNull(result.lastRead)
         assertNull(result.lastPublishAttempt)
         assertNull(result.lastPublishResult)
         assertNull(result.lastSuccessfulPublish)
@@ -196,14 +185,11 @@ class LocationDiagnosticsTest {
     @Test
     fun `successful publish records attempt and success timestamps`() {
         val result = snapshot(
-            lastReadAtMs = 1_700_000_000_000L,
-            lastReadResult = LocationReadStatus.SUCCESS.name,
             lastPublishAttemptAtMs = 1_700_000_001_000L,
             lastPublishResult = "Success",
             lastPublishAtMs = 1_700_000_001_000L,
         )
 
-        assertEquals("Success", result.lastReadResult)
         assertEquals("Success", result.lastPublishResult)
         assertEquals(result.lastPublishAttempt, result.lastSuccessfulPublish)
     }
@@ -236,17 +222,6 @@ class LocationDiagnosticsTest {
     @Test
     fun `publish unavailable is classified`() {
         assertEquals("Location unavailable", classifyResult("Location unavailable"))
-    }
-
-    @Test
-    fun `read results are classified`() {
-        assertEquals("Success", classifyReadResult(LocationReadStatus.SUCCESS.name))
-        assertEquals("Unavailable", classifyReadResult(LocationReadStatus.NO_POSITION.name))
-        assertEquals("Permission denied", classifyReadResult(LocationReadStatus.NO_PERMISSION.name))
-        assertEquals("Location disabled", classifyReadResult(LocationReadStatus.LOCATION_DISABLED.name))
-        assertEquals("Timeout", classifyReadResult(LocationReadStatus.TIMEOUT.name))
-        assertEquals("Error", classifyReadResult(LocationReadStatus.ERROR.name))
-        assertNull(classifyReadResult(null))
     }
 
     @Test
@@ -346,6 +321,38 @@ class LocationDiagnosticsTest {
         assertEquals("none", snapshot().backoff)
         assertNull(snapshot().lastFixDecision)
         assertNull(snapshot().lastPresenceAt)
+    }
+
+    @Test
+    fun `acquisition observability is reported`() {
+        val acquisition = AcquisitionDiagnosticsMonitor.State(
+            running = true,
+            registeredProviders = listOf("network", "passive"),
+            gpsInFlight = true,
+            lastGpsRequestReason = "POOR_ACCURACY",
+            lastGpsRequestAtMs = 3_723_000L,
+            lastGpsResult = "SUCCESS",
+            gpsRequestCount = 4,
+            gpsFailureCount = 1,
+        )
+        val result = snapshot(acquisition = acquisition)
+
+        assertEquals("network,passive", result.acquisitionProviders)
+        assertEquals("Yes", result.gpsInFlight)
+        assertEquals("POOR_ACCURACY 1h02m03s", result.lastGpsRequest)
+        assertEquals("SUCCESS", result.lastGpsResult)
+        assertEquals(4, result.gpsRequests)
+        assertEquals(1, result.gpsFailures)
+    }
+
+    @Test
+    fun `acquisition defaults report none and never`() {
+        val result = snapshot()
+        assertEquals("none", result.acquisitionProviders)
+        assertEquals("No", result.gpsInFlight)
+        assertNull(result.lastGpsRequest)
+        assertNull(result.lastGpsResult)
+        assertEquals(0, result.gpsRequests)
     }
 
     @Test
