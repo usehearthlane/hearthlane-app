@@ -204,3 +204,63 @@ Always write release notes in English, like every other artifact created for the
 Do not rewrite historical decisions merely to make them match the current terminology. Record new strategic decisions as new entries.
 
 `docs/PROJECT.md` is the detailed project-vision reference.
+
+# Android UAT Deployment and Data Preservation
+
+These rules apply to the Hearthlane Android UAT environment.
+
+## UAT identity
+
+UAT package:
+
+- `org.hearthlane.uat`
+
+Default UAT APK:
+
+- `app/build/outputs/apk/uat/debug/app-uat-debug.apk`
+
+The UAT application sandbox is NOT disposable.
+
+It may contain persistent development state, including:
+
+- embedded Tailscale/tsnet node identity;
+- application settings;
+- preferences;
+- databases;
+- other state required for physical validation.
+
+In particular:
+
+- `files/tailscale/tailscaled.state`
+
+contains persistent tsnet state and MUST be treated as important data.
+
+Never assume that uninstalling the UAT application is harmless.
+
+---
+
+## General deployment rule
+
+When asked to build, install, reinstall, update, or deploy UAT to a
+physical Android device, always prefer preserving the existing
+application sandbox.
+
+The normal deployment flow is:
+
+1. build the requested UAT APK;
+2. verify the connected device;
+3. inspect the currently installed UAT package if present;
+4. attempt an in-place update;
+5. only perform backup → uninstall → reinstall → restore when required
+   because of signing-key incompatibility.
+
+Never uninstall UAT preemptively.
+
+---
+
+## Normal UAT build
+
+Unless another build is explicitly requested, build UAT using:
+
+```bash
+./gradlew :app:assembleUatDebug

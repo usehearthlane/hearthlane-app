@@ -26,6 +26,7 @@ services:
       SSH_AUTH_SOCK: /ssh-agent
 
       GIT_TERMINAL_PROMPT: "0"
+      
       GOTMPDIR: /workspace/.tmp/go
       GOCACHE: /workspace/.cache/go-build
       GOPATH: /workspace/.cache/go
@@ -41,9 +42,6 @@ services:
     volumes:
       # Current repository only.
       - ${WORKSPACE_DIR:-.}:/workspace
-
-      # Release
-      - ${HOME}/.config/hearthlane/playstore.jks:/run/secrets/hearthlane_playstore.jks:ro
       
       # Shared OpenCode configuration.
       - ${HOME}/.config/opencode:/home/agent/.config/opencode
@@ -64,6 +62,9 @@ services:
 
       # X11 clipboard.
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
+
+      # Project Release
+      - ${HOME}/.config/hearthlane/playstore.jks:/run/secrets/hearthlane_playstore.jks:ro
 
     security_opt:
       - no-new-privileges:true
